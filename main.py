@@ -25,9 +25,9 @@ HOTKEYS = [
     ("ТП игроков к себе", "Ctrl+1", "teleport"),
     ("Выдать скины по командам", "Ctrl+2", "skins"),
     ("Выдать оружие", "Ctrl+3", "weapons"),
-    ("Выдать здоровье", "Ctrl+8", "health"),
-    ("Выдать броню", "Ctrl+9", "armor"),
-    ("Возрождения", "Ctrl+0", "revive"),
+    ("Выдать здоровье", "Ctrl+4", "health"),
+    ("Выдать броню", "Ctrl+5", "armor"),
+    ("Возрождения", "Ctrl+6", "revive"),
 ]
 
 # Shared registry for collision checks when more hotkey-enabled sections are added.
@@ -355,7 +355,7 @@ class App:
     BG = "#f0f0f0"
     BORDER = "#777777"
     TEXT = "#111111"
-    RED = "#ff0000"
+    BLUE = "#2F6FB3"
 
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -405,7 +405,7 @@ class App:
                           highlightthickness=1)
         footer.grid(row=1, column=0, sticky="ew")
         footer.grid_propagate(False)
-        tk.Label(footer, text="by Пепси Кольный", bg=self.BG, fg=self.RED,
+        tk.Label(footer, text="by Пепси Кольный", bg=self.BG, fg=self.BLUE,
                  font=("Arial", 29, "bold")).pack(expand=True)
 
         bottom = tk.Frame(self.root, bg=self.BG, height=23)
@@ -417,39 +417,84 @@ class App:
                  font=("Arial", 9)).pack(side="right", padx=8)
 
     def _build_info(self, parent: tk.Frame) -> None:
-        parent.grid_rowconfigure(1, weight=1)
+        parent.grid_rowconfigure(0, weight=1)
         parent.grid_columnconfigure(0, weight=1)
-        tk.Label(parent, text="О программе", bg=self.BG, fg=self.TEXT,
-                 font=("Arial", 18, "bold")).grid(row=0, column=0, pady=(12, 7))
-        text_frame = tk.Frame(parent, bg=self.BG)
-        text_frame.grid(row=1, column=0, sticky="nsew", padx=22, pady=(0, 14))
+        card = tk.Frame(parent, bg=self.BG)
+        card.grid(row=0, column=0, sticky="", padx=30, pady=24)
+        tk.Label(card, text="Выдача", bg=self.BG, fg=self.TEXT,
+                 font=("Arial", 28, "bold")).pack(pady=(8, 6))
+        tk.Label(card,
+                 text="Программа для подготовки команд и удобной последовательной выдачи игрокам.",
+                 bg=self.BG, fg=self.TEXT, font=("Arial", 12), wraplength=720,
+                 justify="center").pack(pady=(0, 18))
+        tk.Label(card, text="Автор: Пепси Кольный", bg=self.BG,
+                 font=("Arial", 12, "bold")).pack(pady=3)
+        tk.Label(card, text="Сервер: Байкальский", bg=self.BG,
+                 font=("Arial", 11)).pack(pady=2)
+        tk.Label(card, text="Discord: okyrihuw", bg=self.BG,
+                 font=("Arial", 11)).pack(pady=(2, 18))
+        tk.Button(card, text="Как пользоваться ГМП", width=30, height=2,
+                  command=self._show_gmp_help, font=("Arial", 11)).pack(pady=5)
+        tk.Button(card, text="Режим работы программы", width=30, height=2,
+                  command=self._show_work_mode, font=("Arial", 11)).pack(pady=5)
+        tk.Label(card, text="Настройка игроков и горячих клавиш — во вкладке «ГМП».",
+                 bg=self.BG, font=("Arial", 10)).pack(pady=(15, 5))
+
+    def _show_help_window(self, title: str, body: str) -> None:
+        window = tk.Toplevel(self.root)
+        window.title(title)
+        window.geometry("720x570")
+        window.minsize(560, 420)
+        window.configure(bg=self.BG)
+        window.transient(self.root)
+        window.grid_rowconfigure(1, weight=1)
+        window.grid_columnconfigure(0, weight=1)
+        tk.Label(window, text=title, bg=self.BG, fg=self.TEXT,
+                 font=("Arial", 16, "bold")).grid(row=0, column=0, pady=(12, 8))
+        text_frame = tk.Frame(window, bg=self.BG)
+        text_frame.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 10))
         text_frame.grid_rowconfigure(0, weight=1)
         text_frame.grid_columnconfigure(0, weight=1)
-        info = tk.Text(text_frame, wrap="word", font=("Arial", 11), bg="white",
-                       relief="solid", bd=1, padx=12, pady=10, spacing1=2, spacing3=4)
-        scrollbar = ttk.Scrollbar(text_frame, orient="vertical", command=info.yview)
-        info.configure(yscrollcommand=scrollbar.set)
-        info.grid(row=0, column=0, sticky="nsew")
+        text = tk.Text(text_frame, wrap="word", font=("Arial", 11), bg="white",
+                       relief="solid", bd=1, padx=12, pady=10)
+        scrollbar = ttk.Scrollbar(text_frame, orient="vertical", command=text.yview)
+        text.configure(yscrollcommand=scrollbar.set)
+        text.grid(row=0, column=0, sticky="nsew")
         scrollbar.grid(row=0, column=1, sticky="ns")
-        info.insert("1.0", """ВЫДАЧА — помощник для подготовки игровых команд и последовательной работы с ними. Программа не открывает консоль игры и не отправляет Enter за пользователя.
+        text.insert("1.0", body)
+        text.configure(state="disabled")
+        tk.Button(window, text="Закрыть", command=window.destroy,
+                  font=("Arial", 10), width=14).grid(row=2, column=0, pady=(0, 10))
 
-Автор: Пепси Кольный
-Сервер: Байкальский
-Discord: okyrihuw
+    def _show_gmp_help(self) -> None:
+        self._show_help_window("Как пользоваться ГМП", """1. Заполните ID игроков в нужной колонке. Четыре колонки — независимые группы, в каждой можно указать до 15 игроков. Пустые ID пропускаются.
 
-КАК ПОЛЬЗОВАТЬСЯ
-1. Откройте вкладку «ГМП» и заполните ID игроков. Четыре колонки — независимые группы; пустые поля пропускаются.
-2. Для скинов укажите до двух значений в колонке. Если заполнены оба, ID делятся пополам: первая половина получает «Скин 1», оставшиеся — «Скин 2». При нечётном числе игроков первая половина на одного человека больше. Если заполнен только один скин, он применяется ко всем ID этой группы.
-3. Оружие указывается в порядке выдачи. Для каждого заполненного ID программа подготавливает команды на все заполненные ячейки оружия по порядку, затем переходит к следующему ID. В `/weapongive` используется 1000 патронов.
-4. ХР и броня применяются к заполненным ID во всех четырёх колонках. Пустое значение не создаёт команду.
-5. Нажмите «Сохранить», чтобы сохранить пресет. «Обновить из пресета» загружает последнее сохранение. «Очистить поля» очищает экран, но не удаляет сохранённый пресет.
-6. В блоке «Действие / активация» посмотрите нужный бинд и включите флажок горячих клавиш. Перед биндом вручную откройте в игре консоль F8 и оставьте активным окно игры.
+2. Скины делят игроков внутри одной колонки на две последовательные команды. Если заполнены оба поля: первая половина ID получает «Скин 1», вторая — «Скин 2». При нечётном числе игроков первая команда получает на одного игрока больше. Если заполнено только одно поле скина, он применяется ко всем ID этой группы.
 
-ПОЛУАВТОМАТИЧЕСКАЯ ОЧЕРЕДЬ
-Нажмите бинд действия, например Ctrl+1. Первая команда будет скопирована в буфер обмена. В игре физически нажмите Ctrl+V, затем Enter. После физического Ctrl+V программа подготовит следующую команду. Повторяйте Ctrl+V и Enter, пока очередь не закончится; затем буфер очищается. Программа не имитирует нажатия клавиш. Для остановки или замены очереди нажмите другой бинд.
+3. Укажите до трёх ячеек оружия. Для каждого ID оружия выдаются по порядку: сначала все заполненные слоты первому игроку, затем следующему. Команда `/weapongive` получает 1000 патронов.
 
-Горячие клавиши работают, пока приложение открыто и включён соответствующий флажок. Сохранённый пресет находится в `%APPDATA%\BindiVidacha\preset.json`.""")
-        info.configure(state="disabled")
+4. Значения ХР и брони применяются ко всем заполненным ID во всех четырёх колонках. Если поле пустое, соответствующие команды не создаются.
+
+5. Нажмите «Сохранить» для записи текущего пресета. «Обновить из пресета» загружает последнее сохранение, «Очистить поля» очищает только экран.
+
+БИНДЫ
+Ctrl+1 — телепорт игроков к себе
+Ctrl+2 — выдать скины по командам
+Ctrl+3 — выдать оружие
+Ctrl+4 — выдать здоровье
+Ctrl+5 — выдать броню
+Ctrl+6 — возродить игроков""")
+
+    def _show_work_mode(self) -> None:
+        self._show_help_window("Режим работы программы", """Программа работает полуавтоматически: она подготавливает команды в буфере обмена, а вставку и Enter вы нажимаете сами.
+
+1. Включите флажок горячих клавиш в ГМП.
+2. Переключитесь в игру, откройте консоль клавишей F8 и оставьте активным окно игры. Программа не нажимает F8 и не отправляет Enter.
+3. Нажмите нужный бинд, например Ctrl+1. Первая команда действия будет скопирована в буфер.
+4. Физически нажмите Ctrl+V, затем Enter. Программа замечает физический Ctrl+V и через короткую паузу копирует следующую команду.
+5. Повторяйте Ctrl+V и Enter. После вставки последней команды буфер очищается.
+
+Очередь продвигается только при физическом Ctrl+V в том же окне, где был запущен бинд. Если нажать другой бинд, он заменит текущую очередь. Горячие клавиши доступны, пока программа открыта и включён соответствующий флажок.""")
 
     def _build_gmp(self, parent: tk.Frame) -> None:
         parent.grid_rowconfigure(0, weight=1)
