@@ -133,6 +133,7 @@ class WindowsHotkeys:
         self._user32 = None
         self.paste_hook = None
         self.paste_target_hwnd = 0
+        self.paste_target_pid = 0
         self._paste_v_down = False
         self._physical_ctrl_down = False
 
@@ -175,6 +176,12 @@ class WindowsHotkeys:
         self._user32.PeekMessageW.restype = ctypes.c_int
         self._user32.GetForegroundWindow.argtypes = []
         self._user32.GetForegroundWindow.restype = wintypes.HWND
+        self._user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+        self._user32.GetAsyncKeyState.restype = ctypes.c_short
+        self._user32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND, ctypes.POINTER(wintypes.DWORD)
+        ]
+        self._user32.GetWindowThreadProcessId.restype = wintypes.DWORD
         self._kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
         self._kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 
@@ -208,6 +215,13 @@ class WindowsHotkeys:
             return 0
         return self._handle_value(self._user32.GetForegroundWindow())
 
+    def _window_process_id(self, hwnd: int) -> int:
+        if not hwnd or not WINDOWS or self._user32 is None:
+            return 0
+        process_id = self._wintypes.DWORD()
+        self._user32.GetWindowThreadProcessId(hwnd, self._ctypes.byref(process_id))
+        return int(process_id.value)
+
     def _low_level_keyboard_hook(self, code, wparam, lparam):
         if code == self.HC_ACTION and self.paste_hook:
             try:
@@ -229,8 +243,20 @@ class WindowsHotkeys:
                         self._paste_v_down = False
                     elif is_down and not self._paste_v_down:
                         self._paste_v_down = True
-                        target_active = self.foreground_hwnd() == self.paste_target_hwnd
-                        if not injected and self._physical_ctrl_down and target_active:
+                        # The V event can arrive before our tracked Ctrl state updates on
+                        # some keyboard layouts, so also ask Windows for the live state.
+                        ctrl_async_down = bool(
+                            self._user32.GetAsyncKeyState(self.VK_CONTROL) & 0x8000
+                        )
+                        control_down = self._physical_ctrl_down or ctrl_async_down
+                        foreground = self.foreground_hwnd()
+                        target_active = foreground == self.paste_target_hwnd
+                        if not target_active and self.paste_target_pid:
+                            # F8 may be hosted by another top-level window of the game.
+                            target_active = (
+                                self._window_process_id(foreground) == self.paste_target_pid
+                            )
+                        if not injected and control_down and target_active:
                             # Observe physical Ctrl+V without consuming the user's keypress.
                             self.run_paste()
             except Exception:
@@ -279,6 +305,7 @@ class WindowsHotkeys:
                 success = True
                 if enabled:
                     self.paste_target_hwnd = self._handle_value(msg.lParam)
+                    self.paste_target_pid = self._window_process_id(self.paste_target_hwnd)
                     self._paste_v_down = False
                     self._physical_ctrl_down = False
                     if not self.paste_hook:
@@ -291,6 +318,7 @@ class WindowsHotkeys:
                         self._user32.UnhookWindowsHookEx(self.paste_hook)
                         self.paste_hook = None
                     self.paste_target_hwnd = 0
+                    self.paste_target_pid = 0
                     self._paste_v_down = False
                     self._physical_ctrl_down = False
                 self.monitor_results.put(success)
@@ -523,7 +551,7 @@ Ctrl+6 - возродить игроков""")
 4. Физически нажмите Ctrl+V, затем Enter. Программа замечает физический Ctrl+V и через короткую паузу копирует следующую команду.
 5. Повторяйте Ctrl+V и Enter. После вставки последней команды буфер очищается.
 
-Очередь продвигается только при физическом Ctrl+V в том же окне, где был запущен бинд. Если нажать другой бинд, он заменит текущую очередь. Горячие клавиши доступны, пока программа открыта и включён соответствующий флажок.""")
+Очередь продвигается только при физическом Ctrl+V, когда активно то же игровое приложение, в котором был запущен бинд. Если нажать другой бинд, он заменит текущую очередь. Горячие клавиши доступны, пока программа открыта и включён соответствующий флажок.""")
 
     def _build_gmp(self, parent: tk.Frame) -> None:
         parent.grid_rowconfigure(0, weight=1)
