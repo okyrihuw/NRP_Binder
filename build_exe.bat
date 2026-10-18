@@ -1,8 +1,8 @@
 @echo off
 setlocal
 py -m pip install --upgrade pyinstaller
-py -m PyInstaller --noconfirm --clean --onefile --windowed --name "Выдача" main.py
+py -m PyInstaller --noconfirm --clean --onefile --windowed --name "NRP Binder" main.py
 if errorlevel 1 exit /b %errorlevel%
 echo.
-echo Готово: dist\Выдача.exe
+echo Готово: dist\NRP Binder.exe
 pause

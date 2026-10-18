@@ -11,7 +11,7 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Callable
 
-APP_NAME = "Выдача"
+APP_NAME = "NRP Binder - by okyrihuw"
 WINDOWS = sys.platform == "win32"
 
 # The settings live outside the executable, so updates/rebuilds do not erase presets.
@@ -30,8 +30,18 @@ HOTKEYS = [
     ("Возрождения", "Ctrl+6", "revive"),
 ]
 
-# Shared registry for collision checks when more hotkey-enabled sections are added.
-HOTKEY_CATEGORY_BINDINGS = {"ГМП": tuple(item[1] for item in HOTKEYS)}
+FORUM_HOTKEYS = [
+    ("Выдача команд Forum", "Alt+Ctrl+1", "forum"),
+]
+ALL_HOTKEYS = HOTKEYS + FORUM_HOTKEYS
+
+# Shared registry is used to prevent collisions between enabled tabs.
+HOTKEY_CATEGORY_BINDINGS = {
+    "МП": tuple(item[1] for item in HOTKEYS),
+    "Forum": tuple(item[1] for item in FORUM_HOTKEYS),
+}
+FORUM_COLUMNS = (("Мут", "pmute"), ("КПЗ", "jail"), ("Бан", "pban"))
+FORUM_ROWS = 15
 
 
 def find_hotkey_conflicts(active_categories: dict[str, bool]) -> dict[str, list[str]]:
@@ -41,7 +51,12 @@ def find_hotkey_conflicts(active_categories: dict[str, bool]) -> dict[str, list[
         if not active:
             continue
         for shortcut in HOTKEY_CATEGORY_BINDINGS.get(category, ()):
-            owners.setdefault(shortcut, []).append(category)
+            parts = shortcut.split("+")
+            modifiers = set(parts[:-1])
+            ordered_modifiers = [name for name in ("Ctrl", "Alt", "Shift", "Win")
+                                 if name in modifiers]
+            normalized = "+".join([*ordered_modifiers, parts[-1].upper()])
+            owners.setdefault(normalized, []).append(category)
     return {shortcut: categories for shortcut, categories in owners.items()
             if len(set(categories)) > 1}
 
@@ -83,6 +98,7 @@ COMMANDS = [
 class WindowsHotkeys:
     """Register action binds, copy clipboard text, and observe physical Ctrl+V."""
 
+    MOD_ALT = 0x0001
     MOD_CONTROL = 0x0002
     WM_HOTKEY = 0x0312
     WM_QUIT = 0x0012
@@ -233,27 +249,31 @@ class WindowsHotkeys:
             if result <= 0:
                 break
             if msg.message == self.WM_APP_TOGGLE:
-                requested = bool(msg.wParam)
-                shortcuts = [
-                    (index + 1, self.MOD_CONTROL, ord(key.split("+")[-1]))
-                    for index, (_label, key, _action) in enumerate(HOTKEYS)
-                ]
+                requested_mask = int(msg.wParam)
+                shortcuts = []
+                for index, (_label, shortcut, _action) in enumerate(ALL_HOTKEYS):
+                    hotkey_id = index + 1
+                    if requested_mask & (1 << (hotkey_id - 1)):
+                        modifiers = 0
+                        parts = shortcut.split("+")
+                        if "Ctrl" in parts:
+                            modifiers |= self.MOD_CONTROL
+                        if "Alt" in parts:
+                            modifiers |= self.MOD_ALT
+                        shortcuts.append((hotkey_id, modifiers, ord(parts[-1])))
+                for hotkey_id in tuple(self.registered_ids):
+                    self._user32.UnregisterHotKey(None, hotkey_id)
+                    self.registered_ids.discard(hotkey_id)
                 failed_ids: list[int] = []
-                if requested:
-                    scope_registered = set()
-                    for hotkey_id, modifiers, key in shortcuts:
-                        if self._user32.RegisterHotKey(None, hotkey_id, modifiers, key):
-                            scope_registered.add(hotkey_id)
-                        else:
-                            failed_ids.append(hotkey_id)
-                    self.registered_ids.update(scope_registered)
-                    self.enabled = bool(scope_registered)
-                else:
-                    for hotkey_id in range(1, len(HOTKEYS) + 1):
-                        self._user32.UnregisterHotKey(None, hotkey_id)
-                        self.registered_ids.discard(hotkey_id)
-                    self.enabled = False
-                self.toggle_results.put((self.enabled if requested else True, failed_ids))
+                scope_registered = set()
+                for hotkey_id, modifiers, key in shortcuts:
+                    if self._user32.RegisterHotKey(None, hotkey_id, modifiers, key):
+                        scope_registered.add(hotkey_id)
+                    else:
+                        failed_ids.append(hotkey_id)
+                self.registered_ids.update(scope_registered)
+                self.enabled = bool(scope_registered)
+                self.toggle_results.put((self.enabled if shortcuts else True, failed_ids))
             elif msg.message == self.WM_APP_PASTE_MONITOR:
                 enabled = bool(msg.wParam)
                 success = True
@@ -276,16 +296,21 @@ class WindowsHotkeys:
                 self.monitor_results.put(success)
             elif msg.message == self.WM_HOTKEY:
                 hotkey_id = int(msg.wParam)
-                if self.enabled and 1 <= hotkey_id <= len(HOTKEYS) and hotkey_id in self.registered_ids:
+                if self.enabled and 1 <= hotkey_id <= len(ALL_HOTKEYS) and hotkey_id in self.registered_ids:
                     self.run_action(hotkey_id - 1)
         if self.paste_hook:
             self._user32.UnhookWindowsHookEx(self.paste_hook)
             self.paste_hook = None
 
-    def set_enabled(self, enabled: bool) -> tuple[bool, list[int]]:
+    def set_active_categories(self, categories: set[str]) -> tuple[bool, list[int]]:
         if not WINDOWS or self.thread is None or not self.thread_ready.wait(2):
             return False, []
-        self._user32.PostThreadMessageW(self.thread_id, self.WM_APP_TOGGLE, int(enabled), 0)
+        requested_mask = 0
+        for index, _binding in enumerate(ALL_HOTKEYS):
+            category = "МП" if index < len(HOTKEYS) else "Forum"
+            if category in categories:
+                requested_mask |= 1 << index
+        self._user32.PostThreadMessageW(self.thread_id, self.WM_APP_TOGGLE, requested_mask, 0)
         try:
             return self.toggle_results.get(timeout=2)
         except queue.Empty:
@@ -302,8 +327,8 @@ class WindowsHotkeys:
             return False
 
     def stop(self) -> None:
-        if self.enabled:
-            self.set_enabled(False)
+        if self.registered_ids:
+            self.set_active_categories(set())
         if self.paste_hook:
             self.monitor_paste(False)
         if self.thread_id:
@@ -365,7 +390,8 @@ class App:
         root.configure(bg=self.BG)
         self.fields: dict[str, tk.Entry] = {}
         self.status = tk.StringVar(value="Горячие клавиши выключены")
-        self.hotkeys_enabled = tk.BooleanVar(value=False)
+        self.mp_hotkeys_enabled = tk.BooleanVar(value=False)
+        self.forum_hotkeys_enabled = tk.BooleanVar(value=False)
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.pending_commands: list[str] = []
         self.pending_index = 0
@@ -395,11 +421,14 @@ class App:
         notebook.grid(row=0, column=0, sticky="nsew", padx=2, pady=(2, 0))
 
         info_tab = tk.Frame(notebook, bg=self.BG)
-        gmp_tab = tk.Frame(notebook, bg=self.BG)
+        mp_tab = tk.Frame(notebook, bg=self.BG)
+        forum_tab = tk.Frame(notebook, bg=self.BG)
         notebook.add(info_tab, text="ИНФО")
-        notebook.add(gmp_tab, text="ГМП")
+        notebook.add(mp_tab, text="МП")
+        notebook.add(forum_tab, text="Forum")
         self._build_info(info_tab)
-        self._build_gmp(gmp_tab)
+        self._build_gmp(mp_tab)
+        self._build_forum(forum_tab)
 
         footer = tk.Frame(self.root, bg=self.BG, height=58, highlightbackground=self.BORDER,
                           highlightthickness=1)
@@ -433,11 +462,11 @@ class App:
                  font=("Arial", 11)).pack(pady=2)
         tk.Label(card, text="Discord: okyrihuw", bg=self.BG,
                  font=("Arial", 11)).pack(pady=(2, 18))
-        tk.Button(card, text="Как пользоваться ГМП", width=30, height=2,
+        tk.Button(card, text="Как пользоваться МП", width=30, height=2,
                   command=self._show_gmp_help, font=("Arial", 11)).pack(pady=5)
         tk.Button(card, text="Режим работы программы", width=30, height=2,
                   command=self._show_work_mode, font=("Arial", 11)).pack(pady=5)
-        tk.Label(card, text="Настройка игроков и горячих клавиш — во вкладке «ГМП».",
+        tk.Label(card, text="Настройка игроков и горячих клавиш — во вкладке «МП».",
                  bg=self.BG, font=("Arial", 10)).pack(pady=(15, 5))
 
     def _show_help_window(self, title: str, body: str) -> None:
@@ -467,7 +496,7 @@ class App:
                   font=("Arial", 10), width=14).grid(row=2, column=0, pady=(0, 10))
 
     def _show_gmp_help(self) -> None:
-        self._show_help_window("Как пользоваться ГМП", """1. Заполните ID игроков в нужной колонке. Четыре колонки — независимые группы, в каждой можно указать до 15 игроков. Пустые ID пропускаются.
+        self._show_help_window("Как пользоваться МП", """1. Заполните ID игроков в нужной колонке. Четыре колонки — независимые группы, в каждой можно указать до 15 игроков. Пустые ID пропускаются.
 
 2. Скины делят игроков внутри одной колонки на две последовательные команды. Если заполнены оба поля: первая половина ID получает «Скин 1», вторая — «Скин 2». При нечётном числе игроков первая команда получает на одного игрока больше. Если заполнено только одно поле скина, он применяется ко всем ID этой группы.
 
@@ -488,7 +517,7 @@ Ctrl+6 — возродить игроков""")
     def _show_work_mode(self) -> None:
         self._show_help_window("Режим работы программы", """Программа работает полуавтоматически: она подготавливает команды в буфере обмена, а вставку и Enter вы нажимаете сами.
 
-1. Включите флажок горячих клавиш в ГМП.
+1. Включите флажок горячих клавиш во вкладке МП.
 2. Переключитесь в игру, откройте консоль клавишей F8 и оставьте активным окно игры. Программа не нажимает F8 и не отправляет Enter.
 3. Нажмите нужный бинд, например Ctrl+1. Первая команда действия будет скопирована в буфер.
 4. Физически нажмите Ctrl+V, затем Enter. Программа замечает физический Ctrl+V и через короткую паузу копирует следующую команду.
@@ -548,8 +577,9 @@ Ctrl+6 — возродить игроков""")
         self._field(stats, "health", "ХР:", 1, width=10, label_width=7, compact=True)
 
         if WINDOWS:
-            tk.Checkbutton(controls, text="Включить горячие клавиши",
-                           variable=self.hotkeys_enabled, command=self._toggle_hotkeys,
+            tk.Checkbutton(controls, text="Включить бинды МП",
+                           variable=self.mp_hotkeys_enabled,
+                           command=lambda: self._toggle_hotkeys("МП"),
                            bg=self.BG, activebackground=self.BG,
                            font=("Arial", 10, "bold")).grid(row=2, column=0, columnspan=2,
                                                              sticky="w", pady=(5, 4))
@@ -569,7 +599,7 @@ Ctrl+6 — возродить игроков""")
         button_row = 4 + len(HOTKEYS)
         buttons = [
             ("Сохранить", self.save_preset),
-            ("Очистить поля", self.clear_fields),
+            ("Очистить поля", self.clear_mp_fields),
             ("Обновить из пресета", self.load_preset),
         ]
         for index, (text, callback) in enumerate(buttons):
@@ -581,6 +611,81 @@ Ctrl+6 — возродить игроков""")
                  bg=self.BG, font=("Arial", 9), wraplength=255, justify="left").grid(
                      row=button_row + len(buttons), column=0, columnspan=2,
                      sticky="ew", pady=(5, 0))
+
+    def _build_forum(self, parent: tk.Frame) -> None:
+        parent.grid_rowconfigure(1, weight=1)
+        parent.grid_columnconfigure(0, weight=1)
+        toolbar = tk.Frame(parent, bg=self.BG)
+        toolbar.grid(row=0, column=0, sticky="ew", padx=8, pady=(7, 4))
+        toolbar.grid_columnconfigure(1, weight=1)
+        if WINDOWS:
+            tk.Checkbutton(toolbar, text="Включить бинд Forum",
+                           variable=self.forum_hotkeys_enabled,
+                           command=lambda: self._toggle_hotkeys("Forum"),
+                           bg=self.BG, activebackground=self.BG,
+                           font=("Arial", 10, "bold")).grid(row=0, column=0, sticky="w")
+        else:
+            tk.Label(toolbar, text="Бинд доступен в Windows-сборке",
+                     bg=self.BG, font=("Arial", 10, "bold")).grid(row=0, column=0, sticky="w")
+        tk.Label(toolbar, text="Активация: Alt+Ctrl+1", bg=self.BG,
+                 font=("Arial", 10, "bold")).grid(row=0, column=1, sticky="w", padx=12)
+        buttons = (("Сохранить", self.save_preset),
+                   ("Очистить", self.clear_forum_fields),
+                   ("Обновить", self.load_preset))
+        button_frame = tk.Frame(toolbar, bg=self.BG)
+        button_frame.grid(row=0, column=2, sticky="e")
+        for text, callback in buttons:
+            tk.Button(button_frame, text=text, command=callback,
+                      font=("Arial", 9), width=13).pack(side="left", padx=3)
+
+        columns = tk.Frame(parent, bg=self.BG)
+        columns.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
+        columns.grid_rowconfigure(0, weight=1)
+        for col in range(3):
+            columns.grid_columnconfigure(col, weight=1, uniform="forum_columns")
+        for col, (title, command) in enumerate(FORUM_COLUMNS):
+            frame = tk.Frame(columns, bg=self.BG, highlightbackground="#777777",
+                             highlightthickness=1, padx=4, pady=4)
+            frame.grid(row=0, column=col, sticky="nsew", padx=3)
+            frame.grid_columnconfigure(2, weight=1)
+            tk.Label(frame, text=title, bg="#e5e5e5", fg=self.TEXT,
+                     font=("Arial", 12, "bold"), anchor="center").grid(
+                         row=0, column=0, columnspan=3, sticky="ew", pady=(0, 4), ipady=3)
+            for field_col, text in enumerate(("ID", "Срок", "Причина")):
+                tk.Label(frame, text=text, bg=self.BG, fg=self.TEXT,
+                         font=("Arial", 9, "bold"), anchor="w").grid(
+                             row=1, column=field_col, sticky="ew", padx=(1, 3), pady=(0, 2))
+            for row in range(FORUM_ROWS):
+                for field_col, field_name, width in ((0, "id", 6), (1, "duration", 8), (2, "reason", 22)):
+                    key = f"forum_{command}_{field_name}_{row}"
+                    entry = tk.Entry(frame, width=width, font=("Arial", 9), relief="sunken", bd=1)
+                    entry.grid(row=row + 2, column=field_col, sticky="ew", padx=(1, 3), pady=2, ipady=2)
+                    self.fields[key] = entry
+        tk.Label(parent, text="Заполняйте ID, срок и причину; неполные строки пропускаются. Очередь вставляется вручную через Ctrl+V и Enter.",
+                 bg=self.BG, fg="#333333", font=("Arial", 9), anchor="w").grid(
+                     row=2, column=0, sticky="ew", padx=10, pady=(1, 5))
+
+    def clear_forum_fields(self) -> None:
+        for key, entry in self.fields.items():
+            if key.startswith("forum_"):
+                entry.delete(0, tk.END)
+        self.status.set("Поля Forum очищены; сохранённый пресет не изменён")
+
+    def _forum_commands(self) -> list[str]:
+        commands = []
+        for _title, command in FORUM_COLUMNS:
+            for row in range(FORUM_ROWS):
+                player_id = self.fields[f"forum_{command}_id_{row}"].get().strip()
+                duration = self.fields[f"forum_{command}_duration_{row}"].get().strip()
+                reason = self.fields[f"forum_{command}_reason_{row}"].get().strip()
+                if not (player_id and duration and reason):
+                    continue
+                if not self._valid_token(player_id) or any(ch.isspace() for ch in duration):
+                    continue
+                if "\n" in reason or "\r" in reason:
+                    continue
+                commands.append(f"/{command} {player_id} {duration} {reason}")
+        return commands
 
     def _field(self, parent: tk.Widget, key: str, label: str, row: int, width: int = 10,
                label_width: int = 8, compact: bool = False) -> None:
@@ -594,13 +699,17 @@ Ctrl+6 — возродить игроков""")
         entry.grid(row=row, column=1, sticky="ew", pady=padding_y, ipady=inner_padding)
         self.fields[key] = entry
 
-    def _toggle_hotkeys(self) -> None:
-        enabled = self.hotkeys_enabled.get()
-        # When new sections get hotkeys, add their active state here before enabling them.
-        active_categories = {"ГМП": enabled}
+    def _toggle_hotkeys(self, category: str) -> None:
+        active_categories = {
+            "МП": self.mp_hotkeys_enabled.get(),
+            "Forum": self.forum_hotkeys_enabled.get(),
+        }
         conflicts = find_hotkey_conflicts(active_categories)
         if conflicts:
-            self.hotkeys_enabled.set(False)
+            if category == "МП":
+                self.mp_hotkeys_enabled.set(False)
+            else:
+                self.forum_hotkeys_enabled.set(False)
             details = "\n".join(
                 f"{shortcut}: {', '.join(categories)}"
                 for shortcut, categories in conflicts.items()
@@ -612,16 +721,19 @@ Ctrl+6 — возродить игроков""")
             )
             return
 
-        ok, failed_ids = self.hotkeys.set_enabled(enabled)
+        enabled_categories = {name for name, enabled in active_categories.items() if enabled}
+        ok, failed_ids = self.hotkeys.set_active_categories(enabled_categories)
         if ok:
-            if enabled and failed_ids:
-                failed_keys = [HOTKEYS[i - 1][1] for i in failed_ids]
+            if failed_ids:
+                failed_keys = [ALL_HOTKEYS[hotkey_id - 1][1] for hotkey_id in failed_ids]
                 self.status.set("Горячие клавиши включены частично")
                 messagebox.showwarning("Горячие клавиши", "Не зарегистрировались: " + ", ".join(failed_keys))
             else:
-                self.status.set("Горячие клавиши включены" if enabled else "Горячие клавиши выключены")
+                self.status.set("Горячие клавиши включены" if enabled_categories else "Горячие клавиши выключены")
         else:
-            self.hotkeys_enabled.set(False)
+            self.mp_hotkeys_enabled.set(False)
+            self.forum_hotkeys_enabled.set(False)
+            self.hotkeys.set_active_categories(set())
             self.status.set("Не удалось включить горячие клавиши")
             messagebox.showwarning(
                 "Горячие клавиши",
@@ -702,7 +814,7 @@ Ctrl+6 — возродить игроков""")
         return []
 
     def _hotkey_action(self, index: int) -> None:
-        commands = self._commands_for(index)
+        commands = self._forum_commands() if index == len(HOTKEYS) else self._commands_for(index)
         if not commands:
             self.status.set("Нет заполненных данных — очередь не создана")
             return
@@ -809,9 +921,13 @@ Ctrl+6 — возродить игроков""")
         self.status.set("Пресет загружен")
 
     def clear_fields(self) -> None:
-        for entry in self.fields.values():
-            entry.delete(0, tk.END)
-        self.status.set("Поля очищены; сохранённый пресет не изменён")
+        self.clear_mp_fields()
+
+    def clear_mp_fields(self) -> None:
+        for key, entry in self.fields.items():
+            if not key.startswith("forum_"):
+                entry.delete(0, tk.END)
+        self.status.set("Поля МП очищены; сохранённый пресет не изменён")
 
     def close(self) -> None:
         self.hotkeys.stop()
