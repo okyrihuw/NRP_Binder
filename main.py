@@ -78,6 +78,7 @@ class WindowsHotkeys:
     WM_QUIT = 0x0012
     WM_APP_TOGGLE = 0x8001
     KEYEVENTF_KEYUP = 0x0002
+    KEYEVENTF_SCANCODE = 0x0008
     INPUT_KEYBOARD = 1
     VK_RETURN = 0x0D
     VK_CONTROL = 0x11
@@ -136,6 +137,8 @@ class WindowsHotkeys:
         self._user32.GetMessageW.restype = ctypes.c_int
         self._user32.PeekMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT, wintypes.UINT]
         self._user32.PeekMessageW.restype = ctypes.c_int
+        self._user32.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
+        self._user32.MapVirtualKeyW.restype = wintypes.UINT
         self._init_input_structs()
         self.thread = threading.Thread(target=self._message_loop, daemon=True)
         self.thread.start()
@@ -258,9 +261,13 @@ class WindowsHotkeys:
         if self.thread_id:
             self._user32.PostThreadMessageW(self.thread_id, self.WM_QUIT, 0, 0)
 
-    def _key(self, virtual_key: int, up: bool = False) -> None:
-        flags = self.KEYEVENTF_KEYUP if up else 0
-        self._send_inputs([(virtual_key, 0, flags)])
+    def _scan_key(self, virtual_key: int, up: bool = False) -> None:
+        # Games may read scan codes rather than WM_CHAR / virtual-key messages.
+        scan_code = self._user32.MapVirtualKeyW(virtual_key, 0)
+        if not scan_code:
+            raise RuntimeError(f"Не удалось получить scan code для клавиши {virtual_key}")
+        flags = self.KEYEVENTF_SCANCODE | (self.KEYEVENTF_KEYUP if up else 0)
+        self._send_inputs([(0, scan_code, flags)])
 
     def _set_clipboard_text(self, text: str) -> None:
         payload = text.encode("utf-16-le") + b"\x00\x00"
@@ -298,16 +305,19 @@ class WindowsHotkeys:
             return
         self._set_clipboard_text(text)
         # Use the same Ctrl+V path that the user confirmed works in the MTA console.
-        self._send_inputs([
-            (self.VK_CONTROL, 0, 0),
-            (self.VK_V, 0, 0),
-            (self.VK_V, 0, self.KEYEVENTF_KEYUP),
-            (self.VK_CONTROL, 0, self.KEYEVENTF_KEYUP),
-        ])
+        self._scan_key(self.VK_CONTROL)
+        try:
+            time.sleep(0.04)
+            self._scan_key(self.VK_V)
+            time.sleep(0.04)
+            self._scan_key(self.VK_V, up=True)
+            time.sleep(0.04)
+        finally:
+            self._scan_key(self.VK_CONTROL, up=True)
         time.sleep(0.12)
         if press_enter:
-            self._key(self.VK_RETURN)
-            self._key(self.VK_RETURN, True)
+            self._scan_key(self.VK_RETURN)
+            self._scan_key(self.VK_RETURN, up=True)
 
     def type_command(self, command: str, delay: float) -> None:
         self.paste_text(command, press_enter=True)
