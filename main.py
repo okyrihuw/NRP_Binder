@@ -22,14 +22,28 @@ else:
 CONFIG_FILE = CONFIG_DIR / "preset.json"
 
 HOTKEYS = [
-    ("ТП игроков к себе", "Alt+Ctrl+1", "teleport"),
-    ("Выдать скины по командам", "Alt+Ctrl+2", "skins"),
-    ("Выдать оружие", "Alt+Ctrl+3", "weapons"),
-    ("Выдать здоровье", "Alt+Ctrl+8", "health"),
-    ("Выдать броню", "Alt+Ctrl+9", "armor"),
-    ("Возрождения", "Alt+Ctrl+0", "revive"),
+    ("ТП игроков к себе", "Ctrl+1", "teleport"),
+    ("Выдать скины по командам", "Ctrl+2", "skins"),
+    ("Выдать оружие", "Ctrl+3", "weapons"),
+    ("Выдать здоровье", "Ctrl+8", "health"),
+    ("Выдать броню", "Ctrl+9", "armor"),
+    ("Возрождения", "Ctrl+0", "revive"),
 ]
-TEST_HOTKEYS = [("Ctrl+1", 0x31), ("Ctrl+2", 0x32), ("Ctrl+3", 0x33)]
+
+# Shared registry for collision checks when more hotkey-enabled sections are added.
+HOTKEY_CATEGORY_BINDINGS = {"ГМП": tuple(item[1] for item in HOTKEYS)}
+
+
+def find_hotkey_conflicts(active_categories: dict[str, bool]) -> dict[str, list[str]]:
+    """Return shortcuts claimed by more than one currently enabled category."""
+    owners: dict[str, list[str]] = {}
+    for category, active in active_categories.items():
+        if not active:
+            continue
+        for shortcut in HOTKEY_CATEGORY_BINDINGS.get(category, ()):
+            owners.setdefault(shortcut, []).append(category)
+    return {shortcut: categories for shortcut, categories in owners.items()
+            if len(set(categories)) > 1}
 
 COMMANDS = [
     ("/respawn", "Возродиться самому"),
@@ -67,9 +81,8 @@ COMMANDS = [
 
 
 class WindowsHotkeys:
-    """Global shortcuts plus passive detection of the user's physical Ctrl+V."""
+    """Register action binds, copy clipboard text, and observe physical Ctrl+V."""
 
-    MOD_ALT = 0x0001
     MOD_CONTROL = 0x0002
     WM_HOTKEY = 0x0312
     WM_QUIT = 0x0012
@@ -91,19 +104,15 @@ class WindowsHotkeys:
     CF_UNICODETEXT = 13
     GMEM_MOVEABLE = 0x0002
 
-    def __init__(self, notify: Callable[[str], None], run_action: Callable[[int], None],
-                 run_test: Callable[[int], None], run_paste: Callable[[], None]):
-        self.notify = notify
+    def __init__(self, run_action: Callable[[int], None], run_paste: Callable[[], None]):
         self.run_action = run_action
-        self.run_test = run_test
         self.run_paste = run_paste
         self.thread: threading.Thread | None = None
         self.thread_id = None
         self.thread_ready = threading.Event()
         self.toggle_results: queue.Queue[tuple[bool, list[int]]] = queue.Queue()
         self.monitor_results: queue.Queue[bool] = queue.Queue()
-        self.main_enabled = False
-        self.test_enabled = False
+        self.enabled = False
         self.registered_ids: set[int] = set()
         self._user32 = None
         self.paste_hook = None
@@ -150,8 +159,6 @@ class WindowsHotkeys:
         self._user32.PeekMessageW.restype = ctypes.c_int
         self._user32.GetForegroundWindow.argtypes = []
         self._user32.GetForegroundWindow.restype = wintypes.HWND
-        self._user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
-        self._user32.GetAsyncKeyState.restype = ctypes.c_short
         self._kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
         self._kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 
@@ -200,7 +207,6 @@ class WindowsHotkeys:
                         self._physical_ctrl_down = True
                     elif is_up:
                         self._physical_ctrl_down = False
-
                 is_v_key = event.vkCode == self.VK_V or event.scanCode == self.SCANCODE_V
                 if is_v_key:
                     if is_up:
@@ -209,7 +215,7 @@ class WindowsHotkeys:
                         self._paste_v_down = True
                         target_active = self.foreground_hwnd() == self.paste_target_hwnd
                         if not injected and self._physical_ctrl_down and target_active:
-                            # Observe the physical paste only; never swallow the key event.
+                            # Observe physical Ctrl+V without consuming the user's keypress.
                             self.run_paste()
             except Exception:
                 pass
@@ -228,17 +234,10 @@ class WindowsHotkeys:
                 break
             if msg.message == self.WM_APP_TOGGLE:
                 requested = bool(msg.wParam)
-                test_only = bool(msg.lParam)
-                if test_only:
-                    shortcuts = [(10 + index, self.MOD_CONTROL, key)
-                                 for index, (_label, key) in enumerate(TEST_HOTKEYS)]
-                    ids = range(10, 10 + len(TEST_HOTKEYS))
-                else:
-                    shortcuts = [
-                        (index + 1, self.MOD_ALT | self.MOD_CONTROL, ord(key.split("+")[-1]))
-                        for index, (_label, key, _action) in enumerate(HOTKEYS)
-                    ]
-                    ids = range(1, len(HOTKEYS) + 1)
+                shortcuts = [
+                    (index + 1, self.MOD_CONTROL, ord(key.split("+")[-1]))
+                    for index, (_label, key, _action) in enumerate(HOTKEYS)
+                ]
                 failed_ids: list[int] = []
                 if requested:
                     scope_registered = set()
@@ -248,17 +247,13 @@ class WindowsHotkeys:
                         else:
                             failed_ids.append(hotkey_id)
                     self.registered_ids.update(scope_registered)
-                    scope_enabled = bool(scope_registered)
+                    self.enabled = bool(scope_registered)
                 else:
-                    for hotkey_id in ids:
+                    for hotkey_id in range(1, len(HOTKEYS) + 1):
                         self._user32.UnregisterHotKey(None, hotkey_id)
                         self.registered_ids.discard(hotkey_id)
-                    scope_enabled = True
-                if test_only:
-                    self.test_enabled = scope_enabled if requested else False
-                else:
-                    self.main_enabled = scope_enabled if requested else False
-                self.toggle_results.put((scope_enabled, failed_ids))
+                    self.enabled = False
+                self.toggle_results.put((self.enabled if requested else True, failed_ids))
             elif msg.message == self.WM_APP_PASTE_MONITOR:
                 enabled = bool(msg.wParam)
                 success = True
@@ -281,21 +276,16 @@ class WindowsHotkeys:
                 self.monitor_results.put(success)
             elif msg.message == self.WM_HOTKEY:
                 hotkey_id = int(msg.wParam)
-                if (1 <= hotkey_id <= len(HOTKEYS) and self.main_enabled
-                        and hotkey_id in self.registered_ids):
+                if self.enabled and 1 <= hotkey_id <= len(HOTKEYS) and hotkey_id in self.registered_ids:
                     self.run_action(hotkey_id - 1)
-                elif (10 <= hotkey_id < 10 + len(TEST_HOTKEYS) and self.test_enabled
-                      and hotkey_id in self.registered_ids):
-                    self.run_test(hotkey_id - 10)
         if self.paste_hook:
             self._user32.UnhookWindowsHookEx(self.paste_hook)
             self.paste_hook = None
 
-    def set_enabled(self, enabled: bool, test_only: bool = False) -> tuple[bool, list[int]]:
+    def set_enabled(self, enabled: bool) -> tuple[bool, list[int]]:
         if not WINDOWS or self.thread is None or not self.thread_ready.wait(2):
             return False, []
-        self._user32.PostThreadMessageW(self.thread_id, self.WM_APP_TOGGLE,
-                                        int(enabled), int(test_only))
+        self._user32.PostThreadMessageW(self.thread_id, self.WM_APP_TOGGLE, int(enabled), 0)
         try:
             return self.toggle_results.get(timeout=2)
         except queue.Empty:
@@ -312,10 +302,8 @@ class WindowsHotkeys:
             return False
 
     def stop(self) -> None:
-        if self.main_enabled:
-            self.set_enabled(False, test_only=False)
-        if self.test_enabled:
-            self.set_enabled(False, test_only=True)
+        if self.enabled:
+            self.set_enabled(False)
         if self.paste_hook:
             self.monitor_paste(False)
         if self.thread_id:
@@ -323,13 +311,11 @@ class WindowsHotkeys:
 
     def copy_to_clipboard(self, text: str) -> None:
         payload = text.encode("utf-16-le") + b"\x00\x00"
-        opened = False
         for _ in range(30):
             if self._user32.OpenClipboard(self.owner_hwnd):
-                opened = True
                 break
             time.sleep(0.01)
-        if not opened:
+        else:
             raise RuntimeError("Не удалось открыть буфер обмена Windows")
         handle = None
         try:
@@ -378,10 +364,8 @@ class App:
         root.minsize(980, 620)
         root.configure(bg=self.BG)
         self.fields: dict[str, tk.Entry] = {}
-        self.test_entries: list[tk.Entry] = []
         self.status = tk.StringVar(value="Горячие клавиши выключены")
         self.hotkeys_enabled = tk.BooleanVar(value=False)
-        self.test_hotkeys_enabled = tk.BooleanVar(value=False)
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.pending_commands: list[str] = []
         self.pending_index = 0
@@ -389,8 +373,7 @@ class App:
         self.pending_advance_scheduled = False
         self.pending_delay = 0.05
         self.pending_target_hwnd = 0
-        self.hotkeys = WindowsHotkeys(self._queue_status, self._queue_hotkey,
-                                      self._queue_test_hotkey, self._queue_paste_event)
+        self.hotkeys = WindowsHotkeys(self._queue_hotkey, self._queue_paste_event)
         self._build_ui()
         self.hotkeys.start(root.winfo_id())
         self.root.after(25, self._drain_events)
@@ -405,8 +388,6 @@ class App:
         style.configure("TNotebook", background=self.BG, borderwidth=0)
         style.configure("TNotebook.Tab", padding=(9, 4), font=("Arial", 9))
         style.configure("TButton", font=("Arial", 10), padding=5)
-        style.configure("Treeview", font=("Arial", 10), rowheight=25)
-        style.configure("Treeview.Heading", font=("Arial", 10, "bold"))
 
         self.root.grid_rowconfigure(0, weight=1)
         self.root.grid_columnconfigure(0, weight=1)
@@ -415,16 +396,10 @@ class App:
 
         info_tab = tk.Frame(notebook, bg=self.BG)
         gmp_tab = tk.Frame(notebook, bg=self.BG)
-        commands_tab = tk.Frame(notebook, bg=self.BG)
-        test_tab = tk.Frame(notebook, bg=self.BG)
         notebook.add(info_tab, text="ИНФО")
         notebook.add(gmp_tab, text="ГМП")
-        notebook.add(commands_tab, text="Команды")
-        notebook.add(test_tab, text="Тест")
         self._build_info(info_tab)
         self._build_gmp(gmp_tab)
-        self._build_commands(commands_tab)
-        self._build_test(test_tab)
 
         footer = tk.Frame(self.root, bg=self.BG, height=58, highlightbackground=self.BORDER,
                           highlightthickness=1)
@@ -436,47 +411,45 @@ class App:
         bottom = tk.Frame(self.root, bg=self.BG, height=23)
         bottom.grid(row=2, column=0, sticky="ew", padx=3, pady=(1, 2))
         bottom.grid_propagate(False)
-        tk.Label(bottom, text="ДС: okyrihuw..", bg=self.BG, fg="black",
+        tk.Label(bottom, text="ДС: okyrihuw", bg=self.BG, fg="black",
                  font=("Arial", 9, "bold")).pack(side="left")
         tk.Label(bottom, textvariable=self.status, bg=self.BG, fg="#333333",
                  font=("Arial", 9)).pack(side="right", padx=8)
 
     def _build_info(self, parent: tk.Frame) -> None:
-        parent.grid_columnconfigure(0, weight=1)
-        parent.grid_rowconfigure(0, weight=1)
-        card = tk.Frame(parent, bg=self.BG)
-        card.grid(row=0, column=0, sticky="", padx=30, pady=30)
-        tk.Label(card, text="Выдача", bg=self.BG, fg=self.TEXT,
-                 font=("Arial", 26, "bold")).pack(pady=(8, 14))
-        tk.Label(card, text="Помощник для подготовки и последовательной отправки игровых команд.",
-                 bg=self.BG, font=("Arial", 13), wraplength=700, justify="center").pack(pady=6)
-        tk.Label(card, text="Автор: Пепси Кольный", bg=self.BG,
-                 font=("Arial", 12, "bold")).pack(pady=(20, 4))
-        tk.Label(card, text="Discord: okyrihuw..", bg=self.BG,
-                 font=("Arial", 11)).pack(pady=4)
-        tk.Label(card, text="Горячие клавиши и очередь команд настраиваются во вкладке «ГМП».",
-                 bg=self.BG, font=("Arial", 10), wraplength=700, justify="center").pack(pady=(18, 8))
-
-    def _build_commands(self, parent: tk.Frame) -> None:
         parent.grid_rowconfigure(1, weight=1)
         parent.grid_columnconfigure(0, weight=1)
-        tk.Label(parent, text="Список доступных команд", bg=self.BG,
-                 font=("Arial", 15, "bold")).grid(row=0, column=0, pady=(15, 10))
-        table_frame = tk.Frame(parent, bg=self.BG)
-        table_frame.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
-        table_frame.grid_rowconfigure(0, weight=1)
-        table_frame.grid_columnconfigure(0, weight=1)
-        tree = ttk.Treeview(table_frame, columns=("command", "description"), show="headings")
-        tree.heading("command", text="Команда")
-        tree.heading("description", text="Описание")
-        tree.column("command", width=470, minwidth=300, stretch=True)
-        tree.column("description", width=650, minwidth=300, stretch=True)
-        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=scrollbar.set)
-        tree.grid(row=0, column=0, sticky="nsew")
+        tk.Label(parent, text="О программе", bg=self.BG, fg=self.TEXT,
+                 font=("Arial", 18, "bold")).grid(row=0, column=0, pady=(12, 7))
+        text_frame = tk.Frame(parent, bg=self.BG)
+        text_frame.grid(row=1, column=0, sticky="nsew", padx=22, pady=(0, 14))
+        text_frame.grid_rowconfigure(0, weight=1)
+        text_frame.grid_columnconfigure(0, weight=1)
+        info = tk.Text(text_frame, wrap="word", font=("Arial", 11), bg="white",
+                       relief="solid", bd=1, padx=12, pady=10, spacing1=2, spacing3=4)
+        scrollbar = ttk.Scrollbar(text_frame, orient="vertical", command=info.yview)
+        info.configure(yscrollcommand=scrollbar.set)
+        info.grid(row=0, column=0, sticky="nsew")
         scrollbar.grid(row=0, column=1, sticky="ns")
-        for command, description in COMMANDS:
-            tree.insert("", "end", values=(command, description))
+        info.insert("1.0", """ВЫДАЧА — помощник для подготовки игровых команд и последовательной работы с ними. Программа не открывает консоль игры и не отправляет Enter за пользователя.
+
+Автор: Пепси Кольный
+Сервер: Байкальский
+Discord: okyrihuw
+
+КАК ПОЛЬЗОВАТЬСЯ
+1. Откройте вкладку «ГМП» и заполните ID игроков. Четыре колонки — независимые группы; пустые поля пропускаются.
+2. Для скинов укажите до двух значений в колонке. Если заполнены оба, ID делятся пополам: первая половина получает «Скин 1», оставшиеся — «Скин 2». При нечётном числе игроков первая половина на одного человека больше. Если заполнен только один скин, он применяется ко всем ID этой группы.
+3. Оружие указывается в порядке выдачи. Для каждого заполненного ID программа подготавливает команды на все заполненные ячейки оружия по порядку, затем переходит к следующему ID. В `/weapongive` используется 1000 патронов.
+4. ХР и броня применяются к заполненным ID во всех четырёх колонках. Пустое значение не создаёт команду.
+5. Нажмите «Сохранить», чтобы сохранить пресет. «Обновить из пресета» загружает последнее сохранение. «Очистить поля» очищает экран, но не удаляет сохранённый пресет.
+6. В блоке «Действие / активация» посмотрите нужный бинд и включите флажок горячих клавиш. Перед биндом вручную откройте в игре консоль F8 и оставьте активным окно игры.
+
+ПОЛУАВТОМАТИЧЕСКАЯ ОЧЕРЕДЬ
+Нажмите бинд действия, например Ctrl+1. Первая команда будет скопирована в буфер обмена. В игре физически нажмите Ctrl+V, затем Enter. После физического Ctrl+V программа подготовит следующую команду. Повторяйте Ctrl+V и Enter, пока очередь не закончится; затем буфер очищается. Программа не имитирует нажатия клавиш. Для остановки или замены очереди нажмите другой бинд.
+
+Горячие клавиши работают, пока приложение открыто и включён соответствующий флажок. Сохранённый пресет находится в `%APPDATA%\BindiVidacha\preset.json`.""")
+        info.configure(state="disabled")
 
     def _build_gmp(self, parent: tk.Frame) -> None:
         parent.grid_rowconfigure(0, weight=1)
@@ -494,20 +467,20 @@ class App:
             frame.grid(row=0, column=group, sticky="nw", padx=(3, 2), pady=5)
             frame.grid_columnconfigure(1, weight=1)
             tk.Label(frame, text=f"Группа {group + 1}", bg="#e5e5e5", fg=self.TEXT,
-                     font=("Arial", 10, "bold"), anchor="center").grid(
+                     font=("Arial", 11, "bold"), anchor="center").grid(
                          row=0, column=0, columnspan=2, sticky="ew", pady=(0, 3), ipady=3)
             for i in range(15):
                 self._field(frame, f"id_{group}_{i}", f"ID-{i+1}:", i + 1,
                             width=9, label_width=6, compact=True)
             tk.Label(frame, text="Скины: первая / вторая половина", bg=self.BG,
-                     font=("Arial", 8, "bold"), anchor="w").grid(
+                     font=("Arial", 9, "bold"), anchor="w").grid(
                          row=16, column=0, columnspan=2, sticky="ew", pady=(4, 1))
             self._field(frame, f"skin_{group}_0", "Скин 1:", 17,
                         width=9, label_width=6, compact=True)
             self._field(frame, f"skin_{group}_1", "Скин 2:", 18,
                         width=9, label_width=6, compact=True)
-            tk.Label(frame, text="Оружие: порядок выдачи каждому ID", bg=self.BG,
-                     font=("Arial", 8, "bold"), anchor="w").grid(
+            tk.Label(frame, text="Оружие по порядку для ID", bg=self.BG,
+                     font=("Arial", 9, "bold"), anchor="w").grid(
                          row=19, column=0, columnspan=2, sticky="ew", pady=(4, 1))
             for slot in range(3):
                 self._field(frame, f"weapon_{group}_{slot}", f"Оружие {slot+1}:", 20 + slot,
@@ -533,19 +506,19 @@ class App:
             tk.Checkbutton(controls, text="Включить горячие клавиши",
                            variable=self.hotkeys_enabled, command=self._toggle_hotkeys,
                            bg=self.BG, activebackground=self.BG,
-                           font=("Arial", 9, "bold")).grid(row=2, column=0, columnspan=2,
-                                                            sticky="w", pady=(5, 4))
+                           font=("Arial", 10, "bold")).grid(row=2, column=0, columnspan=2,
+                                                             sticky="w", pady=(5, 4))
         else:
             tk.Label(controls, text="Горячие клавиши доступны в Windows-сборке.",
                      bg=self.BG, font=("Arial", 9)).grid(row=2, column=0, columnspan=2,
                                                           sticky="w", pady=(5, 4))
         tk.Label(controls, text="Действие / активация", bg=self.BG,
-                 font=("Arial", 9, "bold")).grid(row=3, column=0, columnspan=2,
-                                                  sticky="w", pady=(3, 1))
+                 font=("Arial", 10, "bold")).grid(row=3, column=0, columnspan=2,
+                                                   sticky="w", pady=(3, 1))
         for row, (label, key, _action) in enumerate(HOTKEYS, start=4):
-            tk.Label(controls, text=label, bg=self.BG, font=("Arial", 8),
+            tk.Label(controls, text=label, bg=self.BG, font=("Arial", 9),
                      anchor="w").grid(row=row, column=0, sticky="w", pady=1)
-            tk.Label(controls, text=key, bg=self.BG, font=("Arial", 8, "bold"),
+            tk.Label(controls, text=key, bg=self.BG, font=("Arial", 9, "bold"),
                      anchor="e").grid(row=row, column=1, sticky="e", padx=(4, 0), pady=1)
 
         button_row = 4 + len(HOTKEYS)
@@ -559,40 +532,14 @@ class App:
                       font=("Arial", 9)).grid(row=button_row + index, column=0, columnspan=2,
                                               sticky="ew", pady=2)
         tk.Label(controls,
-                 text="В очереди: физический Ctrl+V → Enter. Следующая команда готовится сама.",
-                 bg=self.BG, font=("Arial", 8), wraplength=255, justify="left").grid(
+                 text="В очереди: Ctrl+V → Enter. Следующая команда готовится сама.",
+                 bg=self.BG, font=("Arial", 9), wraplength=255, justify="left").grid(
                      row=button_row + len(buttons), column=0, columnspan=2,
                      sticky="ew", pady=(5, 0))
 
-    def _build_test(self, parent: tk.Frame) -> None:
-        parent.grid_columnconfigure(0, weight=1)
-        parent.grid_rowconfigure(1, weight=1)
-        tk.Label(parent, text="Тест буфера обмена", bg=self.BG,
-                 font=("Arial", 16, "bold")).grid(row=0, column=0, pady=(42, 12))
-        panel = tk.Frame(parent, bg=self.BG)
-        panel.grid(row=1, column=0, sticky="n", padx=40, pady=12)
-        panel.grid_columnconfigure(1, weight=1)
-        for index, (hotkey, _vk) in enumerate(TEST_HOTKEYS):
-            tk.Label(panel, text=f"Текст {index + 1}:", bg=self.BG,
-                     font=("Arial", 12), width=12, anchor="w").grid(
-                         row=index, column=0, sticky="w", padx=(0, 10), pady=8)
-            entry = tk.Entry(panel, width=58, font=("Arial", 12), relief="sunken", bd=1)
-            entry.grid(row=index, column=1, sticky="ew", ipady=4, pady=8)
-            tk.Label(panel, text=hotkey, bg=self.BG, font=("Arial", 12, "bold"),
-                     width=9).grid(row=index, column=2, padx=(15, 0), pady=8)
-            self.test_entries.append(entry)
-        tk.Label(parent,
-                 text="Включите тестовые клавиши на этой вкладке. Ctrl+1/2/3 копируют соответствующий текст; вставьте его вручную.",
-                 bg=self.BG, font=("Arial", 10), wraplength=900, justify="center").grid(
-                     row=2, column=0, padx=20, pady=18, sticky="ew")
-        tk.Checkbutton(parent, text="Включить только тестовые клавиши Ctrl+1…3",
-                       variable=self.test_hotkeys_enabled, command=self._toggle_test_hotkeys,
-                       bg=self.BG, activebackground=self.BG, font=("Arial", 11)).grid(
-                           row=3, column=0, pady=(4, 16))
-
     def _field(self, parent: tk.Widget, key: str, label: str, row: int, width: int = 10,
                label_width: int = 8, compact: bool = False) -> None:
-        font_size = 9 if compact else 10
+        font_size = 10 if compact else 11
         padding_y = 0 if compact else 1
         inner_padding = 1 if compact else 2
         tk.Label(parent, text=label, bg=self.BG, fg=self.TEXT,
@@ -604,42 +551,41 @@ class App:
 
     def _toggle_hotkeys(self) -> None:
         enabled = self.hotkeys_enabled.get()
-        ok, failed_ids = self.hotkeys.set_enabled(enabled, test_only=False)
-        self._report_hotkey_result(ok, failed_ids, enabled, self.hotkeys_enabled,
-                                   "основные клавиши", test_only=False)
+        # When new sections get hotkeys, add their active state here before enabling them.
+        active_categories = {"ГМП": enabled}
+        conflicts = find_hotkey_conflicts(active_categories)
+        if conflicts:
+            self.hotkeys_enabled.set(False)
+            details = "\n".join(
+                f"{shortcut}: {', '.join(categories)}"
+                for shortcut, categories in conflicts.items()
+            )
+            self.status.set("Ошибка: сочетание занято в нескольких разделах")
+            messagebox.showerror(
+                "Конфликт горячих клавиш",
+                "Одно сочетание включено сразу в нескольких разделах:\n" + details
+            )
+            return
 
-    def _toggle_test_hotkeys(self) -> None:
-        enabled = self.test_hotkeys_enabled.get()
-        ok, failed_ids = self.hotkeys.set_enabled(enabled, test_only=True)
-        self._report_hotkey_result(ok, failed_ids, enabled, self.test_hotkeys_enabled,
-                                   "тестовые клавиши", test_only=True)
-
-    def _report_hotkey_result(self, ok: bool, failed_ids: list[int], enabled: bool,
-                              variable: tk.BooleanVar, label: str, test_only: bool) -> None:
+        ok, failed_ids = self.hotkeys.set_enabled(enabled)
         if ok:
             if enabled and failed_ids:
-                if test_only:
-                    failed_keys = [f"Ctrl+{i - 9}" for i in failed_ids]
-                else:
-                    failed_keys = [HOTKEYS[i - 1][1] for i in failed_ids]
-                self.status.set(f"{label} включены частично")
+                failed_keys = [HOTKEYS[i - 1][1] for i in failed_ids]
+                self.status.set("Горячие клавиши включены частично")
                 messagebox.showwarning("Горячие клавиши", "Не зарегистрировались: " + ", ".join(failed_keys))
             else:
-                self.status.set(f"{label.capitalize()} включены" if enabled else f"{label.capitalize()} выключены")
+                self.status.set("Горячие клавиши включены" if enabled else "Горячие клавиши выключены")
         else:
-            variable.set(False)
-            self.status.set(f"Не удалось включить {label}")
-            messagebox.showwarning("Горячие клавиши", "Не удалось зарегистрировать сочетания. Возможно, их заняла другая программа.")
-
-    def _queue_status(self, text: str) -> None:
-        self.events.put(("status", text))
+            self.hotkeys_enabled.set(False)
+            self.status.set("Не удалось включить горячие клавиши")
+            messagebox.showwarning(
+                "Горячие клавиши",
+                "Не удалось зарегистрировать сочетания. Возможно, их заняла другая программа."
+            )
 
     def _queue_hotkey(self, index: int) -> None:
         # Read Tk widgets only on the UI thread; the Win32 message loop stays separate.
         self.events.put(("hotkey", index))
-
-    def _queue_test_hotkey(self, index: int) -> None:
-        self.events.put(("test", index))
 
     def _queue_paste_event(self) -> None:
         self.events.put(("physical_paste", None))
@@ -652,8 +598,6 @@ class App:
                     self.status.set(str(value))
                 elif kind == "hotkey":
                     self._hotkey_action(int(value))
-                elif kind == "test":
-                    self._test_hotkey_action(int(value))
                 elif kind == "physical_paste":
                     self._on_physical_paste()
         except queue.Empty:
@@ -711,22 +655,6 @@ class App:
             verb = "/sethp" if action == "health" else "/setarmor"
             return [f"{verb} {pid} {value}" for pid in ids if self._valid_token(pid)]
         return []
-
-    def _test_hotkey_action(self, index: int) -> None:
-        if not 0 <= index < len(self.test_entries):
-            return
-        if self.pending_commands:
-            self.status.set("Сначала завершите текущую очередь команд")
-            return
-        text = self.test_entries[index].get()
-        if not text:
-            self.status.set("Тестовое поле пустое — ничего не скопировано")
-            return
-        try:
-            self.hotkeys.copy_to_clipboard(text)
-            self.status.set("Тестовый текст скопирован. В игре нажмите Ctrl+V и Enter.")
-        except Exception as exc:
-            self.status.set(f"Ошибка буфера обмена: {exc}")
 
     def _hotkey_action(self, index: int) -> None:
         commands = self._commands_for(index)
