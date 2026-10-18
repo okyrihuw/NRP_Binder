@@ -87,6 +87,8 @@ class WindowsHotkeys:
     LLKHF_LOWER_IL_INJECTED = 0x02
     LLKHF_INJECTED = 0x10
     VK_CONTROL = 0x11
+    VK_LCONTROL = 0xA2
+    VK_RCONTROL = 0xA3
     VK_V = 0x56
     SCANCODE_V = 0x2F
     CF_UNICODETEXT = 13
@@ -110,6 +112,7 @@ class WindowsHotkeys:
         self.paste_hook = None
         self.paste_target_hwnd = 0
         self._paste_v_down = False
+        self._physical_ctrl_down = False
 
     def start(self, owner_hwnd: int | None = None) -> None:
         if not WINDOWS:
@@ -192,16 +195,23 @@ class WindowsHotkeys:
                     lparam, self._ctypes.POINTER(self._KBDLLHOOKSTRUCT)
                 ).contents
                 message = int(wparam)
+                is_down = message in (self.WM_KEYDOWN, self.WM_SYSKEYDOWN)
+                is_up = message in (self.WM_KEYUP, self.WM_SYSKEYUP)
+                injected = event.flags & (self.LLKHF_INJECTED | self.LLKHF_LOWER_IL_INJECTED)
+                if event.vkCode in (self.VK_CONTROL, self.VK_LCONTROL, self.VK_RCONTROL):
+                    if is_down and not injected:
+                        self._physical_ctrl_down = True
+                    elif is_up:
+                        self._physical_ctrl_down = False
+
                 is_v_key = event.vkCode == self.VK_V or event.scanCode == self.SCANCODE_V
                 if is_v_key:
-                    if message in (self.WM_KEYUP, self.WM_SYSKEYUP):
+                    if is_up:
                         self._paste_v_down = False
-                    elif message in (self.WM_KEYDOWN, self.WM_SYSKEYDOWN) and not self._paste_v_down:
+                    elif is_down and not self._paste_v_down:
                         self._paste_v_down = True
-                        injected = event.flags & (self.LLKHF_INJECTED | self.LLKHF_LOWER_IL_INJECTED)
-                        ctrl_down = self._user32.GetAsyncKeyState(self.VK_CONTROL) & 0x8000
                         target_active = self.foreground_hwnd() == self.paste_target_hwnd
-                        if not injected and ctrl_down and target_active:
+                        if not injected and self._physical_ctrl_down and target_active:
                             # Observe the physical paste only; never swallow the key event.
                             self.run_paste()
             except Exception:
@@ -257,6 +267,7 @@ class WindowsHotkeys:
                 if enabled:
                     self.paste_target_hwnd = self._handle_value(msg.lParam)
                     self._paste_v_down = False
+                    self._physical_ctrl_down = False
                     if not self.paste_hook:
                         self.paste_hook = self._user32.SetWindowsHookExW(
                             self.WH_KEYBOARD_LL, self._hook_callback, self._module_handle, 0
@@ -268,6 +279,7 @@ class WindowsHotkeys:
                         self.paste_hook = None
                     self.paste_target_hwnd = 0
                     self._paste_v_down = False
+                    self._physical_ctrl_down = False
                 self.monitor_results.put(success)
             elif msg.message == self.WM_HOTKEY:
                 hotkey_id = int(msg.wParam)
