@@ -80,7 +80,6 @@ class WindowsHotkeys:
     KEYEVENTF_KEYUP = 0x0002
     KEYEVENTF_UNICODE = 0x0004
     INPUT_KEYBOARD = 1
-    VK_F8 = 0x77
     VK_RETURN = 0x0D
 
     def __init__(self, notify: Callable[[str], None], run_action: Callable[[int], None],
@@ -92,7 +91,8 @@ class WindowsHotkeys:
         self.thread_id = None
         self.thread_ready = threading.Event()
         self.toggle_results: queue.Queue[tuple[bool, list[int]]] = queue.Queue()
-        self.enabled = False
+        self.main_enabled = False
+        self.test_enabled = False
         self.registered_ids: set[int] = set()
         self._user32 = None
 
@@ -105,8 +105,50 @@ class WindowsHotkeys:
         self._ctypes = ctypes
         self._wintypes = wintypes
         self._user32 = ctypes.windll.user32
+        self._user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
+        self._user32.RegisterHotKey.restype = ctypes.c_int
+        self._user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
+        self._user32.UnregisterHotKey.restype = ctypes.c_int
+        self._user32.PostThreadMessageW.argtypes = [wintypes.DWORD, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        self._user32.PostThreadMessageW.restype = ctypes.c_int
+        self._user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
+        self._user32.GetMessageW.restype = ctypes.c_int
+        self._user32.PeekMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT, wintypes.UINT]
+        self._user32.PeekMessageW.restype = ctypes.c_int
+        self._init_input_structs()
         self.thread = threading.Thread(target=self._message_loop, daemon=True)
         self.thread.start()
+
+    def _init_input_structs(self) -> None:
+        ctypes = self._ctypes
+        wintypes = self._wintypes
+
+        class KEYBDINPUT(ctypes.Structure):
+            _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD),
+                        ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
+                        ("dwExtraInfo", ctypes.c_size_t)]
+
+        class INPUT_UNION(ctypes.Union):
+            _fields_ = [("ki", KEYBDINPUT)]
+
+        class INPUT(ctypes.Structure):
+            _anonymous_ = ("u",)
+            _fields_ = [("type", wintypes.DWORD), ("u", INPUT_UNION)]
+
+        self._KEYBDINPUT = KEYBDINPUT
+        self._INPUT = INPUT
+        self._user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int]
+        self._user32.SendInput.restype = wintypes.UINT
+
+    def _send_inputs(self, events: list[tuple[int, int, int]]) -> None:
+        inputs = (self._INPUT * len(events))(*[
+            self._INPUT(type=self.INPUT_KEYBOARD,
+                        ki=self._KEYBDINPUT(virtual_key, scan_code, flags, 0, 0))
+            for virtual_key, scan_code, flags in events
+        ])
+        sent = self._user32.SendInput(len(events), inputs, self._ctypes.sizeof(self._INPUT))
+        if sent != len(events):
+            raise RuntimeError(f"Windows приняла только {sent} из {len(events)} событий клавиатуры")
 
     def _message_loop(self) -> None:
         ctypes = self._ctypes
@@ -122,84 +164,75 @@ class WindowsHotkeys:
                 break
             if msg.message == self.WM_APP_TOGGLE:
                 requested = bool(msg.wParam)
+                test_only = bool(msg.lParam)
+                if test_only:
+                    shortcuts = [(10 + index, self.MOD_CONTROL, key)
+                                 for index, (_label, key) in enumerate(TEST_HOTKEYS)]
+                    ids = range(10, 10 + len(TEST_HOTKEYS))
+                else:
+                    keys = [ord("1"), ord("2"), ord("3"), ord("4"), ord("5"), ord("6"), ord("8"), ord("9"), ord("0")]
+                    shortcuts = [(index + 1, self.MOD_ALT | self.MOD_CONTROL, key)
+                                 for index, key in enumerate(keys)]
+                    ids = range(1, len(HOTKEYS) + 1)
+
                 failed_ids: list[int] = []
                 if requested:
-                    shortcuts = [
-                        (index + 1, self.MOD_ALT | self.MOD_CONTROL, key)
-                        for index, key in enumerate([ord("1"), ord("2"), ord("3"), ord("4"), ord("5"), ord("6"), ord("8"), ord("9"), ord("0")])
-                    ]
-                    shortcuts.extend((10 + index, self.MOD_CONTROL, key) for index, (_label, key) in enumerate(TEST_HOTKEYS))
-                    self.registered_ids.clear()
+                    scope_registered = set()
                     for hotkey_id, modifiers, key in shortcuts:
                         if self._user32.RegisterHotKey(None, hotkey_id, modifiers, key):
-                            self.registered_ids.add(hotkey_id)
+                            scope_registered.add(hotkey_id)
                         else:
                             failed_ids.append(hotkey_id)
-                    self.enabled = bool(self.registered_ids)
+                    self.registered_ids.update(scope_registered)
+                    scope_enabled = bool(scope_registered)
                 else:
-                    self.enabled = False
-                    for hotkey_id in range(1, len(HOTKEYS) + len(TEST_HOTKEYS) + 1):
+                    for hotkey_id in ids:
                         self._user32.UnregisterHotKey(None, hotkey_id)
-                    self.registered_ids.clear()
-                self.toggle_results.put((self.enabled if requested else True, failed_ids))
-            elif msg.message == self.WM_HOTKEY and self.enabled:
-                hotkey_id = int(msg.wParam)
-                if 1 <= hotkey_id <= len(HOTKEYS):
-                    self.run_action(hotkey_id - 1)
-                elif len(HOTKEYS) < hotkey_id <= len(HOTKEYS) + len(TEST_HOTKEYS):
-                    self.run_test(hotkey_id - len(HOTKEYS) - 1)
+                        self.registered_ids.discard(hotkey_id)
+                    scope_enabled = True
 
-    def set_enabled(self, enabled: bool) -> tuple[bool, list[int]]:
+                if test_only:
+                    self.test_enabled = scope_enabled if requested else False
+                else:
+                    self.main_enabled = scope_enabled if requested else False
+                self.toggle_results.put((scope_enabled, failed_ids))
+            elif msg.message == self.WM_HOTKEY:
+                hotkey_id = int(msg.wParam)
+                if (1 <= hotkey_id <= len(HOTKEYS) and self.main_enabled
+                        and hotkey_id in self.registered_ids):
+                    self.run_action(hotkey_id - 1)
+                elif (10 <= hotkey_id < 10 + len(TEST_HOTKEYS) and self.test_enabled
+                      and hotkey_id in self.registered_ids):
+                    self.run_test(hotkey_id - 10)
+
+    def set_enabled(self, enabled: bool, test_only: bool = False) -> tuple[bool, list[int]]:
         if not WINDOWS or self.thread is None or not self.thread_ready.wait(2):
             return False, []
-        self._user32.PostThreadMessageW(self.thread_id, self.WM_APP_TOGGLE, int(enabled), 0)
+        self._user32.PostThreadMessageW(self.thread_id, self.WM_APP_TOGGLE,
+                                        int(enabled), int(test_only))
         try:
             return self.toggle_results.get(timeout=2)
         except queue.Empty:
             return False, []
 
     def stop(self) -> None:
-        if self.enabled:
-            self.set_enabled(False)
+        if self.main_enabled:
+            self.set_enabled(False, test_only=False)
+        if self.test_enabled:
+            self.set_enabled(False, test_only=True)
         if self.thread_id:
             self._user32.PostThreadMessageW(self.thread_id, self.WM_QUIT, 0, 0)
 
     def _key(self, virtual_key: int, up: bool = False) -> None:
-        class KEYBDINPUT(self._ctypes.Structure):
-            _fields_ = [("wVk", self._wintypes.WORD), ("wScan", self._wintypes.WORD),
-                        ("dwFlags", self._wintypes.DWORD), ("time", self._wintypes.DWORD),
-                        ("dwExtraInfo", self._ctypes.c_size_t)]
-
-        class INPUT_UNION(self._ctypes.Union):
-            _fields_ = [("ki", KEYBDINPUT)]
-
-        class INPUT(self._ctypes.Structure):
-            _anonymous_ = ("u",)
-            _fields_ = [("type", self._wintypes.DWORD), ("u", INPUT_UNION)]
-
         flags = self.KEYEVENTF_KEYUP if up else 0
-        item = INPUT(type=self.INPUT_KEYBOARD, ki=KEYBDINPUT(virtual_key, 0, flags, 0, 0))
-        self._user32.SendInput(1, self._ctypes.byref(item), self._ctypes.sizeof(INPUT))
+        self._send_inputs([(virtual_key, 0, flags)])
 
     def _unicode_char(self, char: str) -> None:
-        class KEYBDINPUT(self._ctypes.Structure):
-            _fields_ = [("wVk", self._wintypes.WORD), ("wScan", self._wintypes.WORD),
-                        ("dwFlags", self._wintypes.DWORD), ("time", self._wintypes.DWORD),
-                        ("dwExtraInfo", self._ctypes.c_size_t)]
-
-        class INPUT_UNION(self._ctypes.Union):
-            _fields_ = [("ki", KEYBDINPUT)]
-
-        class INPUT(self._ctypes.Structure):
-            _anonymous_ = ("u",)
-            _fields_ = [("type", self._wintypes.DWORD), ("u", INPUT_UNION)]
-
         code = ord(char)
-        inputs = (INPUT * 2)(
-            INPUT(type=self.INPUT_KEYBOARD, ki=KEYBDINPUT(0, code, self.KEYEVENTF_UNICODE, 0, 0)),
-            INPUT(type=self.INPUT_KEYBOARD, ki=KEYBDINPUT(0, code, self.KEYEVENTF_UNICODE | self.KEYEVENTF_KEYUP, 0, 0)),
-        )
-        self._user32.SendInput(2, inputs, self._ctypes.sizeof(INPUT))
+        self._send_inputs([
+            (0, code, self.KEYEVENTF_UNICODE),
+            (0, code, self.KEYEVENTF_UNICODE | self.KEYEVENTF_KEYUP),
+        ])
 
     def type_text(self, text: str, press_enter: bool = False) -> None:
         for char in text:
@@ -231,6 +264,7 @@ class App:
         self.test_entries: list[tk.Entry] = []
         self.status = tk.StringVar(value="Горячие клавиши выключены")
         self.hotkeys_enabled = tk.BooleanVar(value=False)
+        self.test_hotkeys_enabled = tk.BooleanVar(value=False)
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.send_lock = threading.Lock()
         self.hotkeys = WindowsHotkeys(self._queue_status, self._queue_hotkey, self._queue_test_hotkey)
@@ -296,7 +330,7 @@ class App:
         bottom = tk.Frame(parent, bg=self.BG)
         bottom.grid(row=3, column=0, sticky="ew", padx=14, pady=(4, 12))
         if WINDOWS:
-            tk.Checkbutton(bottom, text="Включить горячие клавиши (отправка в активное окно)",
+            tk.Checkbutton(bottom, text="Включить горячие клавиши действий (Alt+Ctrl)",
                            variable=self.hotkeys_enabled, command=self._toggle_hotkeys,
                            bg=self.BG, activebackground=self.BG, font=("Arial", 10)).pack(side="left")
         else:
@@ -367,9 +401,13 @@ class App:
                      width=9).grid(row=index, column=2, padx=(15, 0), pady=8)
             self.test_entries.append(entry)
         tk.Label(parent,
-                 text="Включите горячие клавиши на вкладке «Команды» и откройте консоль игры клавишей F8 вручную. Ctrl+1, Ctrl+2 или Ctrl+3 вставит соответствующий текст в активное поле. Enter не нажимается.",
+                 text="Включите тестовые клавиши ниже. Откройте консоль игры клавишей F8 вручную. Ctrl+1, Ctrl+2 или Ctrl+3 введёт соответствующий текст и нажмёт Enter.",
                  bg=self.BG, font=("Arial", 10), wraplength=900, justify="center").grid(
                      row=2, column=0, padx=20, pady=18, sticky="ew")
+        tk.Checkbutton(parent, text="Включить только тестовые клавиши Ctrl+1…3",
+                       variable=self.test_hotkeys_enabled, command=self._toggle_test_hotkeys,
+                       bg=self.BG, activebackground=self.BG, font=("Arial", 11)).grid(
+                           row=3, column=0, pady=(4, 16))
 
     def _field(self, parent: tk.Widget, key: str, label: str, row: int, width: int = 12,
                label_width: int = 8) -> None:
@@ -382,19 +420,32 @@ class App:
 
     def _toggle_hotkeys(self) -> None:
         enabled = self.hotkeys_enabled.get()
-        ok, failed_ids = self.hotkeys.set_enabled(enabled)
+        ok, failed_ids = self.hotkeys.set_enabled(enabled, test_only=False)
+        self._report_hotkey_result(ok, failed_ids, enabled, self.hotkeys_enabled,
+                                   "основные клавиши", test_only=False)
+
+    def _toggle_test_hotkeys(self) -> None:
+        enabled = self.test_hotkeys_enabled.get()
+        ok, failed_ids = self.hotkeys.set_enabled(enabled, test_only=True)
+        self._report_hotkey_result(ok, failed_ids, enabled, self.test_hotkeys_enabled,
+                                   "тестовые клавиши", test_only=True)
+
+    def _report_hotkey_result(self, ok: bool, failed_ids: list[int], enabled: bool,
+                              variable: tk.BooleanVar, label: str, test_only: bool) -> None:
         if ok:
             if enabled and failed_ids:
-                failed_keys = [f"Ctrl+{i - len(HOTKEYS)}" if i > len(HOTKEYS) else HOTKEYS[i - 1][1]
-                               for i in failed_ids]
-                self.status.set("Включены не все сочетания")
+                if test_only:
+                    failed_keys = [f"Ctrl+{i - 9}" for i in failed_ids]
+                else:
+                    failed_keys = [HOTKEYS[i - 1][1] for i in failed_ids]
+                self.status.set(f"{label} включены частично")
                 messagebox.showwarning("Горячие клавиши", "Не зарегистрировались: " + ", ".join(failed_keys))
             else:
-                self.status.set("Горячие клавиши включены" if enabled else "Горячие клавиши выключены")
+                self.status.set(f"{label.capitalize()} включены" if enabled else f"{label.capitalize()} выключены")
         else:
-            self.hotkeys_enabled.set(False)
-            self.status.set("Не удалось зарегистрировать горячие клавиши")
-            messagebox.showwarning("Горячие клавиши", "Не удалось зарегистрировать ни одно сочетание. Возможно, их заняла другая программа.")
+            variable.set(False)
+            self.status.set(f"Не удалось включить {label}")
+            messagebox.showwarning("Горячие клавиши", "Не удалось зарегистрировать сочетания. Возможно, их заняла другая программа.")
 
     def _queue_status(self, text: str) -> None:
         self.events.put(("status", text))
@@ -485,13 +536,15 @@ class App:
         if not self.send_lock.acquire(blocking=False):
             self.status.set("Предыдущая отправка ещё выполняется")
             return
-        self.status.set(f"Тест: вставляю текст {index + 1} без Enter")
+        self.status.set(f"Тест: ввожу текст {index + 1} и отправляю Enter")
         threading.Thread(target=self._send_test_text, args=(text,), daemon=True).start()
 
     def _send_test_text(self, text: str) -> None:
         try:
-            self.hotkeys.type_text(text, press_enter=False)
-            self._queue_status("Тестовый текст вставлен; Enter не нажат")
+            self.hotkeys.type_text(text, press_enter=True)
+            self._queue_status("Тест: текст введён, Enter отправлен")
+        except Exception as exc:
+            self._queue_status(f"Ошибка ввода: {exc}. Проверьте запуск приложения и игры с одинаковыми правами.")
         finally:
             self.send_lock.release()
 
@@ -515,6 +568,8 @@ class App:
             for command in commands:
                 self.hotkeys.type_command(command, delay=delay)
             self._queue_status(f"Готово: отправлено {len(commands)} команд(ы)")
+        except Exception as exc:
+            self._queue_status(f"Ошибка ввода: {exc}. Проверьте запуск приложения и игры с одинаковыми правами.")
         finally:
             self.send_lock.release()
 
