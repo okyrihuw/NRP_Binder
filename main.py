@@ -32,6 +32,7 @@ HOTKEYS = [
     ("Выдать броню", "Alt+Ctrl+9", "armor"),
     ("Возрождения", "Alt+Ctrl+0", "revive"),
 ]
+TEST_HOTKEYS = [("Ctrl+1", 0x31), ("Ctrl+2", 0x32), ("Ctrl+3", 0x33)]
 
 COMMANDS = [
     ("/respawn", "Возродиться самому"),
@@ -82,14 +83,17 @@ class WindowsHotkeys:
     VK_F8 = 0x77
     VK_RETURN = 0x0D
 
-    def __init__(self, notify: Callable[[str], None], run_action: Callable[[int], None]):
+    def __init__(self, notify: Callable[[str], None], run_action: Callable[[int], None],
+                 run_test: Callable[[int], None]):
         self.notify = notify
         self.run_action = run_action
+        self.run_test = run_test
         self.thread: threading.Thread | None = None
         self.thread_id = None
         self.thread_ready = threading.Event()
-        self.toggle_results: queue.Queue[bool] = queue.Queue()
+        self.toggle_results: queue.Queue[tuple[bool, list[int]]] = queue.Queue()
         self.enabled = False
+        self.registered_ids: set[int] = set()
         self._user32 = None
 
     def start(self) -> None:
@@ -118,35 +122,41 @@ class WindowsHotkeys:
                 break
             if msg.message == self.WM_APP_TOGGLE:
                 requested = bool(msg.wParam)
-                success = True
+                failed_ids: list[int] = []
                 if requested:
-                    keys = [ord("1"), ord("2"), ord("3"), ord("4"), ord("5"), ord("6"), ord("8"), ord("9"), ord("0")]
-                    for hotkey_id, key in enumerate(keys, start=1):
-                        if not self._user32.RegisterHotKey(None, hotkey_id, self.MOD_ALT | self.MOD_CONTROL, key):
-                            success = False
-                    if not success:
-                        for hotkey_id in range(1, len(HOTKEYS) + 1):
-                            self._user32.UnregisterHotKey(None, hotkey_id)
-                    self.enabled = success
+                    shortcuts = [
+                        (index + 1, self.MOD_ALT | self.MOD_CONTROL, key)
+                        for index, key in enumerate([ord("1"), ord("2"), ord("3"), ord("4"), ord("5"), ord("6"), ord("8"), ord("9"), ord("0")])
+                    ]
+                    shortcuts.extend((10 + index, self.MOD_CONTROL, key) for index, (_label, key) in enumerate(TEST_HOTKEYS))
+                    self.registered_ids.clear()
+                    for hotkey_id, modifiers, key in shortcuts:
+                        if self._user32.RegisterHotKey(None, hotkey_id, modifiers, key):
+                            self.registered_ids.add(hotkey_id)
+                        else:
+                            failed_ids.append(hotkey_id)
+                    self.enabled = bool(self.registered_ids)
                 else:
                     self.enabled = False
-                    for hotkey_id in range(1, len(HOTKEYS) + 1):
+                    for hotkey_id in range(1, len(HOTKEYS) + len(TEST_HOTKEYS) + 1):
                         self._user32.UnregisterHotKey(None, hotkey_id)
-                self.toggle_results.put(success)
-            elif msg.message == self.WM_HOTKEY:
-                index = int(msg.wParam) - 1
-                if self.enabled and 0 <= index < len(HOTKEYS):
-                    self.run_action(index)
+                    self.registered_ids.clear()
+                self.toggle_results.put((self.enabled if requested else True, failed_ids))
+            elif msg.message == self.WM_HOTKEY and self.enabled:
+                hotkey_id = int(msg.wParam)
+                if 1 <= hotkey_id <= len(HOTKEYS):
+                    self.run_action(hotkey_id - 1)
+                elif len(HOTKEYS) < hotkey_id <= len(HOTKEYS) + len(TEST_HOTKEYS):
+                    self.run_test(hotkey_id - len(HOTKEYS) - 1)
 
-    def set_enabled(self, enabled: bool) -> bool:
+    def set_enabled(self, enabled: bool) -> tuple[bool, list[int]]:
         if not WINDOWS or self.thread is None or not self.thread_ready.wait(2):
-            return False
+            return False, []
         self._user32.PostThreadMessageW(self.thread_id, self.WM_APP_TOGGLE, int(enabled), 0)
         try:
-            result = self.toggle_results.get(timeout=2)
+            return self.toggle_results.get(timeout=2)
         except queue.Empty:
-            return False
-        return result
+            return False, []
 
     def stop(self) -> None:
         if self.enabled:
@@ -191,16 +201,16 @@ class WindowsHotkeys:
         )
         self._user32.SendInput(2, inputs, self._ctypes.sizeof(INPUT))
 
-    def type_command(self, command: str, first: bool, delay: float) -> None:
-        if first:
-            self._key(self.VK_F8)
-            self._key(self.VK_F8, True)
-            time.sleep(0.18)
-        for char in command:
+    def type_text(self, text: str, press_enter: bool = False) -> None:
+        for char in text:
             self._unicode_char(char)
-        time.sleep(0.04)
-        self._key(self.VK_RETURN)
-        self._key(self.VK_RETURN, True)
+        if press_enter:
+            time.sleep(0.04)
+            self._key(self.VK_RETURN)
+            self._key(self.VK_RETURN, True)
+
+    def type_command(self, command: str, delay: float) -> None:
+        self.type_text(command, press_enter=True)
         # Let the game process each line before sending the next one.
         time.sleep(delay)
 
@@ -218,11 +228,12 @@ class App:
         root.minsize(980, 620)
         root.configure(bg=self.BG)
         self.fields: dict[str, tk.Entry] = {}
+        self.test_entries: list[tk.Entry] = []
         self.status = tk.StringVar(value="Горячие клавиши выключены")
         self.hotkeys_enabled = tk.BooleanVar(value=False)
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.send_lock = threading.Lock()
-        self.hotkeys = WindowsHotkeys(self._queue_status, self._queue_hotkey)
+        self.hotkeys = WindowsHotkeys(self._queue_status, self._queue_hotkey, self._queue_test_hotkey)
         self._build_ui()
         self.hotkeys.start()
         self.root.after(100, self._drain_events)
@@ -242,10 +253,13 @@ class App:
         notebook.pack(fill="both", expand=True, padx=2, pady=(2, 0))
         commands_tab = tk.Frame(notebook, bg=self.BG)
         gmp_tab = tk.Frame(notebook, bg=self.BG)
+        test_tab = tk.Frame(notebook, bg=self.BG)
         notebook.add(commands_tab, text="Команды")
         notebook.add(gmp_tab, text="ГМП")
+        notebook.add(test_tab, text="Тест")
         self._build_commands(commands_tab)
         self._build_gmp(gmp_tab)
+        self._build_test(test_tab)
 
         footer = tk.Frame(self.root, bg=self.BG, height=126, highlightbackground=self.BORDER,
                           highlightthickness=1)
@@ -323,7 +337,7 @@ class App:
         stats.grid_columnconfigure(1, weight=1)
         self._field(stats, "armor", "Броня:", 0, width=12, label_width=8)
         self._field(stats, "health", "ХР:", 1, width=12, label_width=8)
-        self._field(stats, "sleep", "sleep:", 2, width=12, label_width=8)
+        self._field(stats, "sleep", "sleep (мс):", 2, width=12, label_width=11)
 
         buttons = [
             ("[ГМП]Сохранить", self.save_preset),
@@ -334,6 +348,28 @@ class App:
             tk.Button(controls, text=text, command=callback, height=2, width=18,
                       font=("Arial", 12)).grid(row=index + 2, column=0, columnspan=2,
                                                 sticky="ew", pady=(7, 4))
+
+    def _build_test(self, parent: tk.Frame) -> None:
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(1, weight=1)
+        tk.Label(parent, text="Тест ввода горячих клавиш", bg=self.BG,
+                 font=("Arial", 16, "bold")).grid(row=0, column=0, pady=(42, 12))
+        panel = tk.Frame(parent, bg=self.BG)
+        panel.grid(row=1, column=0, sticky="n", padx=40, pady=12)
+        panel.grid_columnconfigure(1, weight=1)
+        for index, (hotkey, _vk) in enumerate(TEST_HOTKEYS):
+            tk.Label(panel, text=f"Текст {index + 1}:", bg=self.BG,
+                     font=("Arial", 12), width=12, anchor="w").grid(
+                         row=index, column=0, sticky="w", padx=(0, 10), pady=8)
+            entry = tk.Entry(panel, width=58, font=("Arial", 12), relief="sunken", bd=1)
+            entry.grid(row=index, column=1, sticky="ew", ipady=4, pady=8)
+            tk.Label(panel, text=hotkey, bg=self.BG, font=("Arial", 12, "bold"),
+                     width=9).grid(row=index, column=2, padx=(15, 0), pady=8)
+            self.test_entries.append(entry)
+        tk.Label(parent,
+                 text="Включите горячие клавиши на вкладке «Команды» и откройте консоль игры клавишей F8 вручную. Ctrl+1, Ctrl+2 или Ctrl+3 вставит соответствующий текст в активное поле. Enter не нажимается.",
+                 bg=self.BG, font=("Arial", 10), wraplength=900, justify="center").grid(
+                     row=2, column=0, padx=20, pady=18, sticky="ew")
 
     def _field(self, parent: tk.Widget, key: str, label: str, row: int, width: int = 12,
                label_width: int = 8) -> None:
@@ -346,12 +382,19 @@ class App:
 
     def _toggle_hotkeys(self) -> None:
         enabled = self.hotkeys_enabled.get()
-        if self.hotkeys.set_enabled(enabled):
-            self.status.set("Горячие клавиши включены" if enabled else "Горячие клавиши выключены")
+        ok, failed_ids = self.hotkeys.set_enabled(enabled)
+        if ok:
+            if enabled and failed_ids:
+                failed_keys = [f"Ctrl+{i - len(HOTKEYS)}" if i > len(HOTKEYS) else HOTKEYS[i - 1][1]
+                               for i in failed_ids]
+                self.status.set("Включены не все сочетания")
+                messagebox.showwarning("Горячие клавиши", "Не зарегистрировались: " + ", ".join(failed_keys))
+            else:
+                self.status.set("Горячие клавиши включены" if enabled else "Горячие клавиши выключены")
         else:
             self.hotkeys_enabled.set(False)
-            self.status.set("Не удалось зарегистрировать клавиши — проверьте конфликты")
-            messagebox.showwarning("Горячие клавиши", "Не удалось включить сочетания. Возможно, они уже заняты другой программой.")
+            self.status.set("Не удалось зарегистрировать горячие клавиши")
+            messagebox.showwarning("Горячие клавиши", "Не удалось зарегистрировать ни одно сочетание. Возможно, их заняла другая программа.")
 
     def _queue_status(self, text: str) -> None:
         self.events.put(("status", text))
@@ -359,6 +402,9 @@ class App:
     def _queue_hotkey(self, index: int) -> None:
         # Read Tk widgets only on the UI thread; the Win32 message loop stays separate.
         self.events.put(("hotkey", index))
+
+    def _queue_test_hotkey(self, index: int) -> None:
+        self.events.put(("test", index))
 
     def _drain_events(self) -> None:
         try:
@@ -368,6 +414,8 @@ class App:
                     self.status.set(str(value))
                 elif kind == "hotkey":
                     self._hotkey_action(int(value))
+                elif kind == "test":
+                    self._test_hotkey_action(int(value))
         except queue.Empty:
             pass
         self.root.after(100, self._drain_events)
@@ -427,6 +475,26 @@ class App:
         except ValueError:
             return 0.0
 
+    def _test_hotkey_action(self, index: int) -> None:
+        if not 0 <= index < len(self.test_entries):
+            return
+        text = self.test_entries[index].get()
+        if not text:
+            self.status.set("Тестовое поле пустое — ничего не вставлено")
+            return
+        if not self.send_lock.acquire(blocking=False):
+            self.status.set("Предыдущая отправка ещё выполняется")
+            return
+        self.status.set(f"Тест: вставляю текст {index + 1} без Enter")
+        threading.Thread(target=self._send_test_text, args=(text,), daemon=True).start()
+
+    def _send_test_text(self, text: str) -> None:
+        try:
+            self.hotkeys.type_text(text, press_enter=False)
+            self._queue_status("Тестовый текст вставлен; Enter не нажат")
+        finally:
+            self.send_lock.release()
+
     def _hotkey_action(self, index: int) -> None:
         if not self.send_lock.acquire(blocking=False):
             self.status.set("Предыдущая отправка ещё выполняется")
@@ -444,8 +512,8 @@ class App:
         try:
             if not WINDOWS:
                 return
-            for index, command in enumerate(commands):
-                self.hotkeys.type_command(command, first=index == 0, delay=delay)
+            for command in commands:
+                self.hotkeys.type_command(command, delay=delay)
             self._queue_status(f"Готово: отправлено {len(commands)} команд(ы)")
         finally:
             self.send_lock.release()
