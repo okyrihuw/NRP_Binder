@@ -78,9 +78,12 @@ class WindowsHotkeys:
     WM_QUIT = 0x0012
     WM_APP_TOGGLE = 0x8001
     KEYEVENTF_KEYUP = 0x0002
-    KEYEVENTF_UNICODE = 0x0004
     INPUT_KEYBOARD = 1
     VK_RETURN = 0x0D
+    VK_CONTROL = 0x11
+    VK_V = 0x56
+    CF_UNICODETEXT = 13
+    GMEM_MOVEABLE = 0x0002
 
     def __init__(self, notify: Callable[[str], None], run_action: Callable[[int], None],
                  run_test: Callable[[int], None]):
@@ -96,15 +99,33 @@ class WindowsHotkeys:
         self.registered_ids: set[int] = set()
         self._user32 = None
 
-    def start(self) -> None:
+    def start(self, owner_hwnd: int | None = None) -> None:
         if not WINDOWS:
             return
+        self.owner_hwnd = owner_hwnd
         import ctypes
         from ctypes import wintypes
 
         self._ctypes = ctypes
         self._wintypes = wintypes
         self._user32 = ctypes.windll.user32
+        self._kernel32 = ctypes.windll.kernel32
+        self._user32.OpenClipboard.argtypes = [wintypes.HWND]
+        self._user32.OpenClipboard.restype = ctypes.c_int
+        self._user32.EmptyClipboard.argtypes = []
+        self._user32.EmptyClipboard.restype = ctypes.c_int
+        self._user32.SetClipboardData.argtypes = [wintypes.UINT, ctypes.c_void_p]
+        self._user32.SetClipboardData.restype = ctypes.c_void_p
+        self._user32.CloseClipboard.argtypes = []
+        self._user32.CloseClipboard.restype = ctypes.c_int
+        self._kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+        self._kernel32.GlobalAlloc.restype = ctypes.c_void_p
+        self._kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+        self._kernel32.GlobalLock.restype = ctypes.c_void_p
+        self._kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+        self._kernel32.GlobalUnlock.restype = ctypes.c_int
+        self._kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+        self._kernel32.GlobalFree.restype = ctypes.c_void_p
         self._user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
         self._user32.RegisterHotKey.restype = ctypes.c_int
         self._user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
@@ -241,23 +262,55 @@ class WindowsHotkeys:
         flags = self.KEYEVENTF_KEYUP if up else 0
         self._send_inputs([(virtual_key, 0, flags)])
 
-    def _unicode_char(self, char: str) -> None:
-        code = ord(char)
-        self._send_inputs([
-            (0, code, self.KEYEVENTF_UNICODE),
-            (0, code, self.KEYEVENTF_UNICODE | self.KEYEVENTF_KEYUP),
-        ])
+    def _set_clipboard_text(self, text: str) -> None:
+        payload = text.encode("utf-16-le") + b"\x00\x00"
+        opened = False
+        for _ in range(30):
+            if self._user32.OpenClipboard(self.owner_hwnd):
+                opened = True
+                break
+            time.sleep(0.01)
+        if not opened:
+            raise RuntimeError("Не удалось открыть буфер обмена Windows")
 
-    def type_text(self, text: str, press_enter: bool = False) -> None:
-        for char in text:
-            self._unicode_char(char)
+        handle = None
+        try:
+            if not self._user32.EmptyClipboard():
+                raise RuntimeError("Не удалось очистить буфер обмена")
+            handle = self._kernel32.GlobalAlloc(self.GMEM_MOVEABLE, len(payload))
+            if not handle:
+                raise RuntimeError("Не удалось выделить память для буфера обмена")
+            pointer = self._kernel32.GlobalLock(handle)
+            if not pointer:
+                raise RuntimeError("Не удалось заблокировать память буфера обмена")
+            self._ctypes.memmove(pointer, payload, len(payload))
+            self._kernel32.GlobalUnlock(handle)
+            if not self._user32.SetClipboardData(self.CF_UNICODETEXT, handle):
+                raise RuntimeError("Windows не приняла текст в буфер обмена")
+            handle = None  # Ownership passes to the Windows clipboard.
+        finally:
+            if handle:
+                self._kernel32.GlobalFree(handle)
+            self._user32.CloseClipboard()
+
+    def paste_text(self, text: str, press_enter: bool = False) -> None:
+        if not text:
+            return
+        self._set_clipboard_text(text)
+        # Use the same Ctrl+V path that the user confirmed works in the MTA console.
+        self._send_inputs([
+            (self.VK_CONTROL, 0, 0),
+            (self.VK_V, 0, 0),
+            (self.VK_V, 0, self.KEYEVENTF_KEYUP),
+            (self.VK_CONTROL, 0, self.KEYEVENTF_KEYUP),
+        ])
+        time.sleep(0.12)
         if press_enter:
-            time.sleep(0.04)
             self._key(self.VK_RETURN)
             self._key(self.VK_RETURN, True)
 
     def type_command(self, command: str, delay: float) -> None:
-        self.type_text(command, press_enter=True)
+        self.paste_text(command, press_enter=True)
         # Let the game process each line before sending the next one.
         time.sleep(delay)
 
@@ -283,7 +336,7 @@ class App:
         self.send_lock = threading.Lock()
         self.hotkeys = WindowsHotkeys(self._queue_status, self._queue_hotkey, self._queue_test_hotkey)
         self._build_ui()
-        self.hotkeys.start()
+        self.hotkeys.start(root.winfo_id())
         self.root.after(100, self._drain_events)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
@@ -555,7 +608,7 @@ class App:
 
     def _send_test_text(self, text: str) -> None:
         try:
-            self.hotkeys.type_text(text, press_enter=True)
+            self.hotkeys.paste_text(text, press_enter=True)
             self._queue_status("Тест: текст введён, Enter отправлен")
         except Exception as exc:
             self._queue_status(f"Ошибка ввода: {exc}. Проверьте запуск приложения и игры с одинаковыми правами.")
