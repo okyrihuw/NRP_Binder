@@ -269,7 +269,7 @@ class WindowsHotkeys:
         flags = self.KEYEVENTF_SCANCODE | (self.KEYEVENTF_KEYUP if up else 0)
         self._send_inputs([(0, scan_code, flags)])
 
-    def _set_clipboard_text(self, text: str) -> None:
+    def copy_to_clipboard(self, text: str) -> None:
         payload = text.encode("utf-16-le") + b"\x00\x00"
         opened = False
         for _ in range(30):
@@ -303,7 +303,7 @@ class WindowsHotkeys:
     def paste_text(self, text: str, press_enter: bool = False) -> None:
         if not text:
             return
-        self._set_clipboard_text(text)
+        self.copy_to_clipboard(text)
         # Use the same Ctrl+V path that the user confirmed works in the MTA console.
         self._scan_key(self.VK_CONTROL)
         try:
@@ -478,7 +478,7 @@ class App:
                      width=9).grid(row=index, column=2, padx=(15, 0), pady=8)
             self.test_entries.append(entry)
         tk.Label(parent,
-                 text="Включите тестовые клавиши ниже. Откройте консоль игры клавишей F8 вручную. Ctrl+1, Ctrl+2 или Ctrl+3 введёт соответствующий текст и нажмёт Enter.",
+                 text="Включите тестовые клавиши ниже. Ctrl+1, Ctrl+2 или Ctrl+3 скопирует соответствующий текст. В игре вручную нажмите Ctrl+V и Enter.",
                  bg=self.BG, font=("Arial", 10), wraplength=900, justify="center").grid(
                      row=2, column=0, padx=20, pady=18, sticky="ew")
         tk.Checkbutton(parent, text="Включить только тестовые клавиши Ctrl+1…3",
@@ -613,13 +613,13 @@ class App:
         if not self.send_lock.acquire(blocking=False):
             self.status.set("Предыдущая отправка ещё выполняется")
             return
-        self.status.set(f"Тест: ввожу текст {index + 1} и отправляю Enter")
+        self.status.set(f"Тест: копирую текст {index + 1} в буфер обмена")
         threading.Thread(target=self._send_test_text, args=(text,), daemon=True).start()
 
     def _send_test_text(self, text: str) -> None:
         try:
-            self.hotkeys.paste_text(text, press_enter=True)
-            self._queue_status("Тест: текст введён, Enter отправлен")
+            self.hotkeys.copy_to_clipboard(text)
+            self._queue_status("Тест: текст скопирован. В игре нажмите Ctrl+V, затем Enter.")
         except Exception as exc:
             self._queue_status(f"Ошибка ввода: {exc}. Проверьте запуск приложения и игры с одинаковыми правами.")
         finally:
