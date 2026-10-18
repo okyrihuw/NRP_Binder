@@ -23,11 +23,8 @@ CONFIG_FILE = CONFIG_DIR / "preset.json"
 
 HOTKEYS = [
     ("ТП игроков к себе", "Alt+Ctrl+1", "teleport"),
-    ("Выдать скины", "Alt+Ctrl+2", "skins"),
-    ("Выдать оружие - 1", "Alt+Ctrl+3", "weapon_1"),
-    ("Выдать оружие - 2", "Alt+Ctrl+4", "weapon_2"),
-    ("Выдать оружие - 3", "Alt+Ctrl+5", "weapon_3"),
-    ("Выдать все оружия", "Alt+Ctrl+6", "weapons"),
+    ("Выдать скины по командам", "Alt+Ctrl+2", "skins"),
+    ("Выдать оружие", "Alt+Ctrl+3", "weapons"),
     ("Выдать здоровье", "Alt+Ctrl+8", "health"),
     ("Выдать броню", "Alt+Ctrl+9", "armor"),
     ("Возрождения", "Alt+Ctrl+0", "revive"),
@@ -237,9 +234,10 @@ class WindowsHotkeys:
                                  for index, (_label, key) in enumerate(TEST_HOTKEYS)]
                     ids = range(10, 10 + len(TEST_HOTKEYS))
                 else:
-                    keys = [ord("1"), ord("2"), ord("3"), ord("4"), ord("5"), ord("6"), ord("8"), ord("9"), ord("0")]
-                    shortcuts = [(index + 1, self.MOD_ALT | self.MOD_CONTROL, key)
-                                 for index, key in enumerate(keys)]
+                    shortcuts = [
+                        (index + 1, self.MOD_ALT | self.MOD_CONTROL, ord(key.split("+")[-1]))
+                        for index, (_label, key, _action) in enumerate(HOTKEYS)
+                    ]
                     ids = range(1, len(HOTKEYS) + 1)
                 failed_ids: list[int] = []
                 if requested:
@@ -405,64 +403,80 @@ class App:
         except tk.TclError:
             pass
         style.configure("TNotebook", background=self.BG, borderwidth=0)
-        style.configure("TNotebook.Tab", padding=(8, 3), font=("Arial", 9))
-        style.configure("TButton", font=("Arial", 12), padding=10)
+        style.configure("TNotebook.Tab", padding=(9, 4), font=("Arial", 9))
+        style.configure("TButton", font=("Arial", 10), padding=5)
+        style.configure("Treeview", font=("Arial", 10), rowheight=25)
+        style.configure("Treeview.Heading", font=("Arial", 10, "bold"))
 
+        self.root.grid_rowconfigure(0, weight=1)
+        self.root.grid_columnconfigure(0, weight=1)
         notebook = ttk.Notebook(self.root)
-        notebook.pack(fill="both", expand=True, padx=2, pady=(2, 0))
-        commands_tab = tk.Frame(notebook, bg=self.BG)
+        notebook.grid(row=0, column=0, sticky="nsew", padx=2, pady=(2, 0))
+
+        info_tab = tk.Frame(notebook, bg=self.BG)
         gmp_tab = tk.Frame(notebook, bg=self.BG)
+        commands_tab = tk.Frame(notebook, bg=self.BG)
         test_tab = tk.Frame(notebook, bg=self.BG)
-        notebook.add(commands_tab, text="Команды")
+        notebook.add(info_tab, text="ИНФО")
         notebook.add(gmp_tab, text="ГМП")
+        notebook.add(commands_tab, text="Команды")
         notebook.add(test_tab, text="Тест")
-        self._build_commands(commands_tab)
+        self._build_info(info_tab)
         self._build_gmp(gmp_tab)
+        self._build_commands(commands_tab)
         self._build_test(test_tab)
 
-        footer = tk.Frame(self.root, bg=self.BG, height=126, highlightbackground=self.BORDER,
+        footer = tk.Frame(self.root, bg=self.BG, height=58, highlightbackground=self.BORDER,
                           highlightthickness=1)
-        footer.pack(fill="x", side="bottom")
-        footer.pack_propagate(False)
+        footer.grid(row=1, column=0, sticky="ew")
+        footer.grid_propagate(False)
         tk.Label(footer, text="by Пепси Кольный", bg=self.BG, fg=self.RED,
-                 font=("Arial", 42, "bold")).pack(expand=True)
-        bottom = tk.Frame(self.root, bg=self.BG)
-        bottom.pack(fill="x", side="bottom", padx=3, pady=(2, 3))
+                 font=("Arial", 29, "bold")).pack(expand=True)
+
+        bottom = tk.Frame(self.root, bg=self.BG, height=23)
+        bottom.grid(row=2, column=0, sticky="ew", padx=3, pady=(1, 2))
+        bottom.grid_propagate(False)
         tk.Label(bottom, text="ДС: okyrihuw..", bg=self.BG, fg="black",
-                 font=("Arial", 10, "bold")).pack(side="left")
+                 font=("Arial", 9, "bold")).pack(side="left")
         tk.Label(bottom, textvariable=self.status, bg=self.BG, fg="#333333",
                  font=("Arial", 9)).pack(side="right", padx=8)
 
-    def _build_commands(self, parent: tk.Frame) -> None:
-        parent.grid_rowconfigure(2, weight=1)
+    def _build_info(self, parent: tk.Frame) -> None:
         parent.grid_columnconfigure(0, weight=1)
-        header = tk.Frame(parent, bg=self.BG)
-        header.grid(row=0, column=0, sticky="ew", pady=(62, 8))
-        header.grid_columnconfigure(0, weight=1)
-        header.grid_columnconfigure(1, weight=1)
-        tk.Label(header, text="Действие:", bg=self.BG, font=("Arial", 14)).grid(row=0, column=0)
-        tk.Label(header, text="Клавиша активации:", bg=self.BG, font=("Arial", 14)).grid(row=0, column=1)
-        tk.Frame(parent, bg="#333333", height=1).grid(row=1, column=0, sticky="ew")
-        table = tk.Frame(parent, bg=self.BG)
-        table.grid(row=2, column=0, sticky="nsew", pady=(4, 3))
-        table.grid_columnconfigure(0, weight=1)
-        table.grid_columnconfigure(1, weight=1)
-        for row, (label, key, _action) in enumerate(HOTKEYS):
-            tk.Label(table, text=label, bg=self.BG, font=("Arial", 13, "bold"),
-                     anchor="w").grid(row=row, column=0, padx=(25, 5), pady=7, sticky="w")
-            tk.Label(table, text=key, bg=self.BG, font=("Arial", 13, "bold"),
-                     anchor="w").grid(row=row, column=1, padx=(5, 0), pady=7, sticky="w")
-        bottom = tk.Frame(parent, bg=self.BG)
-        bottom.grid(row=3, column=0, sticky="ew", padx=14, pady=(4, 12))
-        if WINDOWS:
-            tk.Checkbutton(bottom, text="Включить горячие клавиши действий (Alt+Ctrl)",
-                           variable=self.hotkeys_enabled, command=self._toggle_hotkeys,
-                           bg=self.BG, activebackground=self.BG, font=("Arial", 10)).pack(side="left")
-        else:
-            tk.Label(bottom, text="Глобальные клавиши доступны в Windows-сборке.", bg=self.BG,
-                     font=("Arial", 10)).pack(side="left")
-        tk.Button(bottom, text="Список команд", command=self._show_command_catalog,
-                  font=("Arial", 10), padx=8, pady=3).pack(side="right")
+        parent.grid_rowconfigure(0, weight=1)
+        card = tk.Frame(parent, bg=self.BG)
+        card.grid(row=0, column=0, sticky="", padx=30, pady=30)
+        tk.Label(card, text="Выдача", bg=self.BG, fg=self.TEXT,
+                 font=("Arial", 26, "bold")).pack(pady=(8, 14))
+        tk.Label(card, text="Помощник для подготовки и последовательной отправки игровых команд.",
+                 bg=self.BG, font=("Arial", 13), wraplength=700, justify="center").pack(pady=6)
+        tk.Label(card, text="Автор: Пепси Кольный", bg=self.BG,
+                 font=("Arial", 12, "bold")).pack(pady=(20, 4))
+        tk.Label(card, text="Discord: okyrihuw..", bg=self.BG,
+                 font=("Arial", 11)).pack(pady=4)
+        tk.Label(card, text="Горячие клавиши и очередь команд настраиваются во вкладке «ГМП».",
+                 bg=self.BG, font=("Arial", 10), wraplength=700, justify="center").pack(pady=(18, 8))
+
+    def _build_commands(self, parent: tk.Frame) -> None:
+        parent.grid_rowconfigure(1, weight=1)
+        parent.grid_columnconfigure(0, weight=1)
+        tk.Label(parent, text="Список доступных команд", bg=self.BG,
+                 font=("Arial", 15, "bold")).grid(row=0, column=0, pady=(15, 10))
+        table_frame = tk.Frame(parent, bg=self.BG)
+        table_frame.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
+        table_frame.grid_rowconfigure(0, weight=1)
+        table_frame.grid_columnconfigure(0, weight=1)
+        tree = ttk.Treeview(table_frame, columns=("command", "description"), show="headings")
+        tree.heading("command", text="Команда")
+        tree.heading("description", text="Описание")
+        tree.column("command", width=470, minwidth=300, stretch=True)
+        tree.column("description", width=650, minwidth=300, stretch=True)
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        for command, description in COMMANDS:
+            tree.insert("", "end", values=(command, description))
 
     def _build_gmp(self, parent: tk.Frame) -> None:
         parent.grid_rowconfigure(0, weight=1)
@@ -472,46 +486,88 @@ class App:
         for col in range(4):
             content.grid_columnconfigure(col, weight=1, uniform="groups")
         content.grid_columnconfigure(4, weight=0)
+        content.grid_columnconfigure(5, weight=0)
+
         for group in range(4):
-            frame = tk.Frame(content, bg=self.BG)
-            frame.grid(row=0, column=group, sticky="nw", padx=(4, 3), pady=(8, 4))
+            frame = tk.Frame(content, bg=self.BG, highlightbackground="#c5c5c5",
+                             highlightthickness=1, padx=5, pady=4)
+            frame.grid(row=0, column=group, sticky="nw", padx=(3, 2), pady=5)
+            frame.grid_columnconfigure(1, weight=1)
+            tk.Label(frame, text=f"Группа {group + 1}", bg="#e5e5e5", fg=self.TEXT,
+                     font=("Arial", 10, "bold"), anchor="center").grid(
+                         row=0, column=0, columnspan=2, sticky="ew", pady=(0, 3), ipady=3)
             for i in range(15):
-                self._field(frame, f"id_{group}_{i}", f"ID-{i+1}:", i, width=12)
-            line = 15
-            for n in range(2):
-                self._field(frame, f"skin_{group}_{n}", f"Скин:", line+n, width=12)
-            line += 2
-            for n in range(3):
-                self._field(frame, f"weapon_{group}_{n}", f"Оружие:", line+n, width=12)
+                self._field(frame, f"id_{group}_{i}", f"ID-{i+1}:", i + 1,
+                            width=9, label_width=6, compact=True)
+            tk.Label(frame, text="Скины: первая / вторая половина", bg=self.BG,
+                     font=("Arial", 8, "bold"), anchor="w").grid(
+                         row=16, column=0, columnspan=2, sticky="ew", pady=(4, 1))
+            self._field(frame, f"skin_{group}_0", "Скин 1:", 17,
+                        width=9, label_width=6, compact=True)
+            self._field(frame, f"skin_{group}_1", "Скин 2:", 18,
+                        width=9, label_width=6, compact=True)
+            tk.Label(frame, text="Оружие: порядок выдачи каждому ID", bg=self.BG,
+                     font=("Arial", 8, "bold"), anchor="w").grid(
+                         row=19, column=0, columnspan=2, sticky="ew", pady=(4, 1))
+            for slot in range(3):
+                self._field(frame, f"weapon_{group}_{slot}", f"Оружие {slot+1}:", 20 + slot,
+                            width=9, label_width=9, compact=True)
 
         separator = tk.Frame(content, bg="#153c86", width=2)
-        separator.grid(row=0, column=4, sticky="ns", padx=(5, 2))
-        controls = tk.Frame(content, bg=self.BG, width=255)
-        controls.grid(row=0, column=5, sticky="nsew", padx=(20, 16))
+        separator.grid(row=0, column=4, sticky="ns", padx=(4, 3), pady=5)
+        controls = tk.Frame(content, bg=self.BG, width=270)
+        controls.grid(row=0, column=5, sticky="nsew", padx=(8, 8), pady=5)
         controls.grid_propagate(False)
-        controls.grid_columnconfigure(1, weight=1)
-        controls.grid_rowconfigure(0, weight=1)
+        controls.grid_columnconfigure(0, weight=1)
+        controls.grid_columnconfigure(1, weight=0)
+        tk.Label(controls, text="Параметры и бинды", bg=self.BG,
+                 font=("Arial", 12, "bold")).grid(row=0, column=0, columnspan=2,
+                                                   sticky="w", pady=(0, 5))
         stats = tk.Frame(controls, bg=self.BG)
-        stats.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 5))
+        stats.grid(row=1, column=0, columnspan=2, sticky="ew")
         stats.grid_columnconfigure(1, weight=1)
-        self._field(stats, "armor", "Броня:", 0, width=12, label_width=8)
-        self._field(stats, "health", "ХР:", 1, width=12, label_width=8)
-        self._field(stats, "sleep", "sleep (мс):", 2, width=12, label_width=11)
+        self._field(stats, "armor", "Броня:", 0, width=10, label_width=7, compact=True)
+        self._field(stats, "health", "ХР:", 1, width=10, label_width=7, compact=True)
 
+        if WINDOWS:
+            tk.Checkbutton(controls, text="Включить горячие клавиши",
+                           variable=self.hotkeys_enabled, command=self._toggle_hotkeys,
+                           bg=self.BG, activebackground=self.BG,
+                           font=("Arial", 9, "bold")).grid(row=2, column=0, columnspan=2,
+                                                            sticky="w", pady=(5, 4))
+        else:
+            tk.Label(controls, text="Горячие клавиши доступны в Windows-сборке.",
+                     bg=self.BG, font=("Arial", 9)).grid(row=2, column=0, columnspan=2,
+                                                          sticky="w", pady=(5, 4))
+        tk.Label(controls, text="Действие / активация", bg=self.BG,
+                 font=("Arial", 9, "bold")).grid(row=3, column=0, columnspan=2,
+                                                  sticky="w", pady=(3, 1))
+        for row, (label, key, _action) in enumerate(HOTKEYS, start=4):
+            tk.Label(controls, text=label, bg=self.BG, font=("Arial", 8),
+                     anchor="w").grid(row=row, column=0, sticky="w", pady=1)
+            tk.Label(controls, text=key, bg=self.BG, font=("Arial", 8, "bold"),
+                     anchor="e").grid(row=row, column=1, sticky="e", padx=(4, 0), pady=1)
+
+        button_row = 4 + len(HOTKEYS)
         buttons = [
-            ("[ГМП]Сохранить", self.save_preset),
-            ("[ГМП]Очистить", self.clear_fields),
-            ("[ГМП]Обновить", self.load_preset),
+            ("Сохранить", self.save_preset),
+            ("Очистить поля", self.clear_fields),
+            ("Обновить из пресета", self.load_preset),
         ]
         for index, (text, callback) in enumerate(buttons):
-            tk.Button(controls, text=text, command=callback, height=2, width=18,
-                      font=("Arial", 12)).grid(row=index + 2, column=0, columnspan=2,
-                                                sticky="ew", pady=(7, 4))
+            tk.Button(controls, text=text, command=callback, height=1,
+                      font=("Arial", 9)).grid(row=button_row + index, column=0, columnspan=2,
+                                              sticky="ew", pady=2)
+        tk.Label(controls,
+                 text="В очереди: физический Ctrl+V → Enter. Следующая команда готовится сама.",
+                 bg=self.BG, font=("Arial", 8), wraplength=255, justify="left").grid(
+                     row=button_row + len(buttons), column=0, columnspan=2,
+                     sticky="ew", pady=(5, 0))
 
     def _build_test(self, parent: tk.Frame) -> None:
         parent.grid_columnconfigure(0, weight=1)
         parent.grid_rowconfigure(1, weight=1)
-        tk.Label(parent, text="Тест ввода горячих клавиш", bg=self.BG,
+        tk.Label(parent, text="Тест буфера обмена", bg=self.BG,
                  font=("Arial", 16, "bold")).grid(row=0, column=0, pady=(42, 12))
         panel = tk.Frame(parent, bg=self.BG)
         panel.grid(row=1, column=0, sticky="n", padx=40, pady=12)
@@ -526,7 +582,7 @@ class App:
                      width=9).grid(row=index, column=2, padx=(15, 0), pady=8)
             self.test_entries.append(entry)
         tk.Label(parent,
-                 text="Включите тестовые клавиши ниже. Ctrl+1, Ctrl+2 или Ctrl+3 скопирует соответствующий текст. В игре вручную нажмите Ctrl+V и Enter.",
+                 text="Включите тестовые клавиши на этой вкладке. Ctrl+1/2/3 копируют соответствующий текст; вставьте его вручную.",
                  bg=self.BG, font=("Arial", 10), wraplength=900, justify="center").grid(
                      row=2, column=0, padx=20, pady=18, sticky="ew")
         tk.Checkbutton(parent, text="Включить только тестовые клавиши Ctrl+1…3",
@@ -534,13 +590,16 @@ class App:
                        bg=self.BG, activebackground=self.BG, font=("Arial", 11)).grid(
                            row=3, column=0, pady=(4, 16))
 
-    def _field(self, parent: tk.Widget, key: str, label: str, row: int, width: int = 12,
-               label_width: int = 8) -> None:
+    def _field(self, parent: tk.Widget, key: str, label: str, row: int, width: int = 10,
+               label_width: int = 8, compact: bool = False) -> None:
+        font_size = 9 if compact else 10
+        padding_y = 0 if compact else 1
+        inner_padding = 1 if compact else 2
         tk.Label(parent, text=label, bg=self.BG, fg=self.TEXT,
-                 font=("Arial", 12), width=label_width, anchor="w").grid(
-                     row=row, column=0, sticky="w", pady=2)
-        entry = tk.Entry(parent, width=width, font=("Arial", 11), relief="sunken", bd=1)
-        entry.grid(row=row, column=1, sticky="w", pady=2, ipady=3)
+                 font=("Arial", font_size), width=label_width, anchor="w").grid(
+                     row=row, column=0, sticky="w", pady=padding_y)
+        entry = tk.Entry(parent, width=width, font=("Arial", font_size), relief="sunken", bd=1)
+        entry.grid(row=row, column=1, sticky="ew", pady=padding_y, ipady=inner_padding)
         self.fields[key] = entry
 
     def _toggle_hotkeys(self) -> None:
@@ -619,27 +678,31 @@ class App:
             result = []
             for group in range(4):
                 group_ids = [self.fields[f"id_{group}_{i}"].get().strip() for i in range(15)]
+                group_ids = [pid for pid in group_ids if self._valid_token(pid)]
                 skins = [self.fields[f"skin_{group}_{i}"].get().strip() for i in range(2)]
-                for pid in group_ids:
-                    if not self._valid_token(pid):
-                        continue
-                    for skin in skins:
-                        if self._valid_token(skin):
-                            result.append(f"/tempskin {pid} {skin}")
+                skins = [skin for skin in skins if self._valid_token(skin)]
+                if not group_ids or not skins:
+                    continue
+                if len(skins) == 1:
+                    assignments = [skins[0]] * len(group_ids)
+                else:
+                    first_team_size = (len(group_ids) + 1) // 2
+                    assignments = ([skins[0]] * first_team_size
+                                   + [skins[1]] * (len(group_ids) - first_team_size))
+                result.extend(f"/tempskin {pid} {skin}"
+                              for pid, skin in zip(group_ids, assignments))
             return result
-        if action.startswith("weapon") or action == "weapons":
-            slots = range(3) if action == "weapons" else [int(action[-1]) - 1]
+        if action == "weapons":
             result = []
             for group in range(4):
                 group_ids = [self.fields[f"id_{group}_{i}"].get().strip() for i in range(15)]
-                for slot in slots:
-                    weapon = self.fields[f"weapon_{group}_{slot}"].get().strip()
-                    if not self._valid_token(weapon):
-                        continue
-                    for pid in group_ids:
-                        if self._valid_token(pid):
-                            # The game command requires an ammunition count; use 1000 per weapon.
-                            result.append(f"/weapongive {pid} {weapon} 1000")
+                group_ids = [pid for pid in group_ids if self._valid_token(pid)]
+                weapons = [self.fields[f"weapon_{group}_{slot}"].get().strip() for slot in range(3)]
+                weapons = [weapon for weapon in weapons if self._valid_token(weapon)]
+                for pid in group_ids:
+                    for weapon in weapons:
+                        # The server command requires an ammunition count; use 1000 per weapon.
+                        result.append(f"/weapongive {pid} {weapon} 1000")
             return result
         if action in ("health", "armor"):
             value = self.fields[action].get().strip()
@@ -648,13 +711,6 @@ class App:
             verb = "/sethp" if action == "health" else "/setarmor"
             return [f"{verb} {pid} {value}" for pid in ids if self._valid_token(pid)]
         return []
-
-    def _delay_seconds(self) -> float:
-        text = self.fields["sleep"].get().strip()
-        try:
-            return min(max(float(text), 0.0), 60000.0) / 1000.0 if text else 0.0
-        except ValueError:
-            return 0.0
 
     def _test_hotkey_action(self, index: int) -> None:
         if not 0 <= index < len(self.test_entries):
@@ -688,8 +744,8 @@ class App:
         self.pending_commands = commands
         self.pending_index = 0
         self.pending_advance_scheduled = False
-        # After Ctrl+V, wait at least 50 ms so the target has consumed the current clipboard.
-        self.pending_delay = max(0.05, self._delay_seconds())
+        # Let the game consume the current clipboard before preparing the next line.
+        self.pending_delay = 0.05
         self.pending_target_hwnd = target_hwnd
 
         if not self.hotkeys.monitor_paste(True, target_hwnd):
@@ -783,28 +839,6 @@ class App:
         for entry in self.fields.values():
             entry.delete(0, tk.END)
         self.status.set("Поля очищены; сохранённый пресет не изменён")
-
-    def _show_command_catalog(self) -> None:
-        win = tk.Toplevel(self.root)
-        win.title("Список команд")
-        win.geometry("750x600")
-        win.configure(bg=self.BG)
-        tk.Label(win, text="Доступные команды", bg=self.BG, font=("Arial", 16, "bold")).pack(pady=10)
-        container = tk.Frame(win, bg=self.BG)
-        container.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-        canvas = tk.Canvas(container, bg=self.BG, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
-        inner = tk.Frame(canvas, bg=self.BG)
-        inner.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=inner, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        for row, (command, description) in enumerate(COMMANDS):
-            tk.Label(inner, text=command, bg=self.BG, font=("Consolas", 10, "bold"),
-                     anchor="w", width=49).grid(row=row, column=0, sticky="w", padx=8, pady=3)
-            tk.Label(inner, text=description, bg=self.BG, font=("Arial", 10),
-                     anchor="w").grid(row=row, column=1, sticky="w", padx=8, pady=3)
 
     def close(self) -> None:
         self.hotkeys.stop()
