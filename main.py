@@ -598,9 +598,9 @@ Ctrl+6 — возродить игроков""")
 
         button_row = 4 + len(HOTKEYS)
         buttons = [
-            ("Сохранить", self.save_preset),
+            ("Сохранить", self.save_mp_preset),
             ("Очистить поля", self.clear_mp_fields),
-            ("Обновить из пресета", self.load_preset),
+            ("Обновить из пресета", self.load_mp_preset),
         ]
         for index, (text, callback) in enumerate(buttons):
             tk.Button(controls, text=text, command=callback, height=1,
@@ -629,9 +629,9 @@ Ctrl+6 — возродить игроков""")
                      bg=self.BG, font=("Arial", 10, "bold")).grid(row=0, column=0, sticky="w")
         tk.Label(toolbar, text="Активация: Alt+Ctrl+1", bg=self.BG,
                  font=("Arial", 10, "bold")).grid(row=0, column=1, sticky="w", padx=12)
-        buttons = (("Сохранить", self.save_preset),
+        buttons = (("Сохранить", self.save_forum_preset),
                    ("Очистить", self.clear_forum_fields),
-                   ("Обновить", self.load_preset))
+                   ("Обновить", self.load_forum_preset))
         button_frame = tk.Frame(toolbar, bg=self.BG)
         button_frame.grid(row=0, column=2, sticky="e")
         for text, callback in buttons:
@@ -895,19 +895,33 @@ Ctrl+6 — возродить игроков""")
         self.pending_target_hwnd = 0
         self.hotkeys.monitor_paste(False)
 
-    def save_preset(self) -> None:
+    @staticmethod
+    def _is_forum_field(key: str) -> bool:
+        return key.startswith("forum_")
+
+    def _save_preset_subset(self, forum: bool | None) -> None:
         try:
+            try:
+                data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    data = {}
+            except (FileNotFoundError, json.JSONDecodeError):
+                data = {}
+            data.update({key: entry.get() for key, entry in self.fields.items()
+                         if forum is None or self._is_forum_field(key) == forum})
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            data = {key: entry.get() for key, entry in self.fields.items()}
             CONFIG_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            self.status.set("Пресет сохранён")
-            messagebox.showinfo("Пресет", "Настройки сохранены.")
+            category = "Forum" if forum is True else "МП" if forum is False else "программы"
+            self.status.set(f"Пресет {category} сохранён")
+            messagebox.showinfo("Пресет", f"Настройки {category} сохранены.")
         except OSError as exc:
             messagebox.showerror("Ошибка сохранения", str(exc))
 
-    def load_preset(self) -> None:
+    def _load_preset_subset(self, forum: bool | None) -> None:
         try:
             data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise json.JSONDecodeError("Ожидался объект настроек", "", 0)
         except FileNotFoundError:
             self.status.set("Сохранённый пресет не найден")
             messagebox.showinfo("Пресет", "Пока нет сохранённого пресета.")
@@ -916,9 +930,29 @@ Ctrl+6 — возродить игроков""")
             messagebox.showerror("Ошибка загрузки", str(exc))
             return
         for key, entry in self.fields.items():
-            entry.delete(0, tk.END)
-            entry.insert(0, str(data.get(key, "")))
-        self.status.set("Пресет загружен")
+            if forum is None or self._is_forum_field(key) == forum:
+                entry.delete(0, tk.END)
+                entry.insert(0, str(data.get(key, "")))
+        category = "Forum" if forum is True else "МП" if forum is False else "программы"
+        self.status.set(f"Пресет {category} загружен")
+
+    def save_mp_preset(self) -> None:
+        self._save_preset_subset(forum=False)
+
+    def load_mp_preset(self) -> None:
+        self._load_preset_subset(forum=False)
+
+    def save_forum_preset(self) -> None:
+        self._save_preset_subset(forum=True)
+
+    def load_forum_preset(self) -> None:
+        self._load_preset_subset(forum=True)
+
+    def save_preset(self) -> None:
+        self._save_preset_subset(forum=None)
+
+    def load_preset(self) -> None:
+        self._load_preset_subset(forum=None)
 
     def clear_fields(self) -> None:
         self.clear_mp_fields()
