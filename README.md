@@ -19,7 +19,7 @@
   </tr>
   <tr>
     <td><a href="docs/screenshots/info.png"><img src="docs/screenshots/info.png" alt="Предпросмотр вкладки ИНФО" width="360"></a></td>
-    <td><a href="docs/screenshots/mp.png"><img src="docs/screenshots/mp.png" alt="Предпросмотр вкладки МП" width="360"></a></td>
+    <td><a href="docs/screenshots/mp.png"><img src="docs/screenshots/mp.png" alt="Скриншот вкладки МП" width="360"></a></td>
     <td><a href="docs/screenshots/forum.png"><img src="docs/screenshots/forum.png" alt="Предпросмотр вкладки Forum" width="360"></a></td>
   </tr>
 </table>
