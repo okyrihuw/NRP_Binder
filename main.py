@@ -450,10 +450,10 @@ class App:
         parent.grid_columnconfigure(0, weight=1)
         card = tk.Frame(parent, bg=self.BG)
         card.grid(row=0, column=0, sticky="", padx=30, pady=24)
-        tk.Label(card, text="Выдача", bg=self.BG, fg=self.TEXT,
+        tk.Label(card, text="NRP Binder", bg=self.BG, fg=self.TEXT,
                  font=("Arial", 28, "bold")).pack(pady=(8, 6))
         tk.Label(card,
-                 text="Программа для подготовки команд и удобной последовательной выдачи игрокам.",
+                 text="Помощник администрации для подготовки игровых команд и последовательной выдачи наказаний и действий.",
                  bg=self.BG, fg=self.TEXT, font=("Arial", 12), wraplength=720,
                  justify="center").pack(pady=(0, 18))
         tk.Label(card, text="Автор: Пепси Кольный", bg=self.BG,
