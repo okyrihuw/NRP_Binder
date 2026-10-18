@@ -128,13 +128,27 @@ class WindowsHotkeys:
                         ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
                         ("dwExtraInfo", ctypes.c_size_t)]
 
+        class MOUSEINPUT(ctypes.Structure):
+            _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG),
+                        ("mouseData", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
+                        ("time", wintypes.DWORD), ("dwExtraInfo", ctypes.c_size_t)]
+
+        class HARDWAREINPUT(ctypes.Structure):
+            _fields_ = [("uMsg", wintypes.DWORD), ("wParamL", wintypes.WORD),
+                        ("wParamH", wintypes.WORD)]
+
+        # INPUT's union must be as large as MOUSEINPUT even when we only send keys;
+        # otherwise cbSize is wrong and Windows rejects every SendInput call.
         class INPUT_UNION(ctypes.Union):
-            _fields_ = [("ki", KEYBDINPUT)]
+            _fields_ = [("mi", MOUSEINPUT), ("ki", KEYBDINPUT), ("hi", HARDWAREINPUT)]
 
         class INPUT(ctypes.Structure):
             _anonymous_ = ("u",)
             _fields_ = [("type", wintypes.DWORD), ("u", INPUT_UNION)]
 
+        expected_size = 40 if ctypes.sizeof(ctypes.c_void_p) == 8 else 28
+        if ctypes.sizeof(INPUT) != expected_size:
+            raise RuntimeError(f"Неверный размер Windows INPUT: {ctypes.sizeof(INPUT)} вместо {expected_size}")
         self._KEYBDINPUT = KEYBDINPUT
         self._INPUT = INPUT
         self._user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int]
