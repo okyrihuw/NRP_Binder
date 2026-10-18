@@ -70,35 +70,46 @@ COMMANDS = [
 
 
 class WindowsHotkeys:
-    """Register visible global hotkeys and type commands into the foreground game."""
+    """Global shortcuts plus passive detection of the user's physical Ctrl+V."""
 
     MOD_ALT = 0x0001
     MOD_CONTROL = 0x0002
     WM_HOTKEY = 0x0312
     WM_QUIT = 0x0012
     WM_APP_TOGGLE = 0x8001
-    KEYEVENTF_KEYUP = 0x0002
-    KEYEVENTF_SCANCODE = 0x0008
-    INPUT_KEYBOARD = 1
-    VK_RETURN = 0x0D
+    WM_APP_PASTE_MONITOR = 0x8002
+    WH_KEYBOARD_LL = 13
+    HC_ACTION = 0
+    WM_KEYDOWN = 0x0100
+    WM_KEYUP = 0x0101
+    WM_SYSKEYDOWN = 0x0104
+    WM_SYSKEYUP = 0x0105
+    LLKHF_LOWER_IL_INJECTED = 0x02
+    LLKHF_INJECTED = 0x10
     VK_CONTROL = 0x11
     VK_V = 0x56
+    SCANCODE_V = 0x2F
     CF_UNICODETEXT = 13
     GMEM_MOVEABLE = 0x0002
 
     def __init__(self, notify: Callable[[str], None], run_action: Callable[[int], None],
-                 run_test: Callable[[int], None]):
+                 run_test: Callable[[int], None], run_paste: Callable[[], None]):
         self.notify = notify
         self.run_action = run_action
         self.run_test = run_test
+        self.run_paste = run_paste
         self.thread: threading.Thread | None = None
         self.thread_id = None
         self.thread_ready = threading.Event()
         self.toggle_results: queue.Queue[tuple[bool, list[int]]] = queue.Queue()
+        self.monitor_results: queue.Queue[bool] = queue.Queue()
         self.main_enabled = False
         self.test_enabled = False
         self.registered_ids: set[int] = set()
         self._user32 = None
+        self.paste_hook = None
+        self.paste_target_hwnd = 0
+        self._paste_v_down = False
 
     def start(self, owner_hwnd: int | None = None) -> None:
         if not WINDOWS:
@@ -137,62 +148,70 @@ class WindowsHotkeys:
         self._user32.GetMessageW.restype = ctypes.c_int
         self._user32.PeekMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT, wintypes.UINT]
         self._user32.PeekMessageW.restype = ctypes.c_int
-        self._user32.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
-        self._user32.MapVirtualKeyW.restype = wintypes.UINT
-        self._init_input_structs()
+        self._user32.GetForegroundWindow.argtypes = []
+        self._user32.GetForegroundWindow.restype = wintypes.HWND
+        self._user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+        self._user32.GetAsyncKeyState.restype = ctypes.c_short
+        self._kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+        self._kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+
+        class KBDLLHOOKSTRUCT(ctypes.Structure):
+            _fields_ = [("vkCode", wintypes.DWORD), ("scanCode", wintypes.DWORD),
+                        ("flags", wintypes.DWORD), ("time", wintypes.DWORD),
+                        ("dwExtraInfo", ctypes.c_size_t)]
+
+        self._KBDLLHOOKSTRUCT = KBDLLHOOKSTRUCT
+        self._HOOKPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_int,
+                                            wintypes.WPARAM, wintypes.LPARAM)
+        self._user32.SetWindowsHookExW.argtypes = [ctypes.c_int, self._HOOKPROC,
+                                                   wintypes.HINSTANCE, wintypes.DWORD]
+        self._user32.SetWindowsHookExW.restype = ctypes.c_void_p
+        self._user32.UnhookWindowsHookEx.argtypes = [ctypes.c_void_p]
+        self._user32.UnhookWindowsHookEx.restype = ctypes.c_int
+        self._user32.CallNextHookEx.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                                wintypes.WPARAM, wintypes.LPARAM]
+        self._user32.CallNextHookEx.restype = ctypes.c_ssize_t
+        self._module_handle = self._kernel32.GetModuleHandleW(None)
+        self._hook_callback = self._HOOKPROC(self._low_level_keyboard_hook)
         self.thread = threading.Thread(target=self._message_loop, daemon=True)
         self.thread.start()
 
-    def _init_input_structs(self) -> None:
-        ctypes = self._ctypes
-        wintypes = self._wintypes
+    @staticmethod
+    def _handle_value(handle) -> int:
+        return int(handle or 0)
 
-        class KEYBDINPUT(ctypes.Structure):
-            _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD),
-                        ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
-                        ("dwExtraInfo", ctypes.c_size_t)]
+    def foreground_hwnd(self) -> int:
+        if not WINDOWS or self._user32 is None:
+            return 0
+        return self._handle_value(self._user32.GetForegroundWindow())
 
-        class MOUSEINPUT(ctypes.Structure):
-            _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG),
-                        ("mouseData", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
-                        ("time", wintypes.DWORD), ("dwExtraInfo", ctypes.c_size_t)]
-
-        class HARDWAREINPUT(ctypes.Structure):
-            _fields_ = [("uMsg", wintypes.DWORD), ("wParamL", wintypes.WORD),
-                        ("wParamH", wintypes.WORD)]
-
-        # INPUT's union must be as large as MOUSEINPUT even when we only send keys;
-        # otherwise cbSize is wrong and Windows rejects every SendInput call.
-        class INPUT_UNION(ctypes.Union):
-            _fields_ = [("mi", MOUSEINPUT), ("ki", KEYBDINPUT), ("hi", HARDWAREINPUT)]
-
-        class INPUT(ctypes.Structure):
-            _anonymous_ = ("u",)
-            _fields_ = [("type", wintypes.DWORD), ("u", INPUT_UNION)]
-
-        expected_size = 40 if ctypes.sizeof(ctypes.c_void_p) == 8 else 28
-        if ctypes.sizeof(INPUT) != expected_size:
-            raise RuntimeError(f"Неверный размер Windows INPUT: {ctypes.sizeof(INPUT)} вместо {expected_size}")
-        self._KEYBDINPUT = KEYBDINPUT
-        self._INPUT = INPUT
-        self._user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int]
-        self._user32.SendInput.restype = wintypes.UINT
-
-    def _send_inputs(self, events: list[tuple[int, int, int]]) -> None:
-        inputs = (self._INPUT * len(events))(*[
-            self._INPUT(type=self.INPUT_KEYBOARD,
-                        ki=self._KEYBDINPUT(virtual_key, scan_code, flags, 0, 0))
-            for virtual_key, scan_code, flags in events
-        ])
-        sent = self._user32.SendInput(len(events), inputs, self._ctypes.sizeof(self._INPUT))
-        if sent != len(events):
-            raise RuntimeError(f"Windows приняла только {sent} из {len(events)} событий клавиатуры")
+    def _low_level_keyboard_hook(self, code, wparam, lparam):
+        if code == self.HC_ACTION and self.paste_hook:
+            try:
+                event = self._ctypes.cast(
+                    lparam, self._ctypes.POINTER(self._KBDLLHOOKSTRUCT)
+                ).contents
+                message = int(wparam)
+                is_v_key = event.vkCode == self.VK_V or event.scanCode == self.SCANCODE_V
+                if is_v_key:
+                    if message in (self.WM_KEYUP, self.WM_SYSKEYUP):
+                        self._paste_v_down = False
+                    elif message in (self.WM_KEYDOWN, self.WM_SYSKEYDOWN) and not self._paste_v_down:
+                        self._paste_v_down = True
+                        injected = event.flags & (self.LLKHF_INJECTED | self.LLKHF_LOWER_IL_INJECTED)
+                        ctrl_down = self._user32.GetAsyncKeyState(self.VK_CONTROL) & 0x8000
+                        target_active = self.foreground_hwnd() == self.paste_target_hwnd
+                        if not injected and ctrl_down and target_active:
+                            # Observe the physical paste only; never swallow the key event.
+                            self.run_paste()
+            except Exception:
+                pass
+        return self._user32.CallNextHookEx(self.paste_hook, code, wparam, lparam)
 
     def _message_loop(self) -> None:
         ctypes = self._ctypes
         wintypes = self._wintypes
         self.thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
-        # Force creation of this thread's message queue before the UI posts toggle requests.
         self._user32.PeekMessageW(ctypes.byref(wintypes.MSG()), None, 0, 0, 0)
         self.thread_ready.set()
         msg = wintypes.MSG()
@@ -212,7 +231,6 @@ class WindowsHotkeys:
                     shortcuts = [(index + 1, self.MOD_ALT | self.MOD_CONTROL, key)
                                  for index, key in enumerate(keys)]
                     ids = range(1, len(HOTKEYS) + 1)
-
                 failed_ids: list[int] = []
                 if requested:
                     scope_registered = set()
@@ -228,12 +246,29 @@ class WindowsHotkeys:
                         self._user32.UnregisterHotKey(None, hotkey_id)
                         self.registered_ids.discard(hotkey_id)
                     scope_enabled = True
-
                 if test_only:
                     self.test_enabled = scope_enabled if requested else False
                 else:
                     self.main_enabled = scope_enabled if requested else False
                 self.toggle_results.put((scope_enabled, failed_ids))
+            elif msg.message == self.WM_APP_PASTE_MONITOR:
+                enabled = bool(msg.wParam)
+                success = True
+                if enabled:
+                    self.paste_target_hwnd = self._handle_value(msg.lParam)
+                    self._paste_v_down = False
+                    if not self.paste_hook:
+                        self.paste_hook = self._user32.SetWindowsHookExW(
+                            self.WH_KEYBOARD_LL, self._hook_callback, self._module_handle, 0
+                        )
+                    success = bool(self.paste_hook)
+                else:
+                    if self.paste_hook:
+                        self._user32.UnhookWindowsHookEx(self.paste_hook)
+                        self.paste_hook = None
+                    self.paste_target_hwnd = 0
+                    self._paste_v_down = False
+                self.monitor_results.put(success)
             elif msg.message == self.WM_HOTKEY:
                 hotkey_id = int(msg.wParam)
                 if (1 <= hotkey_id <= len(HOTKEYS) and self.main_enabled
@@ -242,6 +277,9 @@ class WindowsHotkeys:
                 elif (10 <= hotkey_id < 10 + len(TEST_HOTKEYS) and self.test_enabled
                       and hotkey_id in self.registered_ids):
                     self.run_test(hotkey_id - 10)
+        if self.paste_hook:
+            self._user32.UnhookWindowsHookEx(self.paste_hook)
+            self.paste_hook = None
 
     def set_enabled(self, enabled: bool, test_only: bool = False) -> tuple[bool, list[int]]:
         if not WINDOWS or self.thread is None or not self.thread_ready.wait(2):
@@ -253,21 +291,25 @@ class WindowsHotkeys:
         except queue.Empty:
             return False, []
 
+    def monitor_paste(self, enabled: bool, target_hwnd: int = 0) -> bool:
+        if not WINDOWS or self.thread is None or not self.thread_ready.wait(2):
+            return False
+        self._user32.PostThreadMessageW(self.thread_id, self.WM_APP_PASTE_MONITOR,
+                                        int(enabled), target_hwnd)
+        try:
+            return self.monitor_results.get(timeout=2)
+        except queue.Empty:
+            return False
+
     def stop(self) -> None:
         if self.main_enabled:
             self.set_enabled(False, test_only=False)
         if self.test_enabled:
             self.set_enabled(False, test_only=True)
+        if self.paste_hook:
+            self.monitor_paste(False)
         if self.thread_id:
             self._user32.PostThreadMessageW(self.thread_id, self.WM_QUIT, 0, 0)
-
-    def _scan_key(self, virtual_key: int, up: bool = False) -> None:
-        # Games may read scan codes rather than WM_CHAR / virtual-key messages.
-        scan_code = self._user32.MapVirtualKeyW(virtual_key, 0)
-        if not scan_code:
-            raise RuntimeError(f"Не удалось получить scan code для клавиши {virtual_key}")
-        flags = self.KEYEVENTF_SCANCODE | (self.KEYEVENTF_KEYUP if up else 0)
-        self._send_inputs([(0, scan_code, flags)])
 
     def copy_to_clipboard(self, text: str) -> None:
         payload = text.encode("utf-16-le") + b"\x00\x00"
@@ -279,7 +321,6 @@ class WindowsHotkeys:
             time.sleep(0.01)
         if not opened:
             raise RuntimeError("Не удалось открыть буфер обмена Windows")
-
         handle = None
         try:
             if not self._user32.EmptyClipboard():
@@ -294,35 +335,24 @@ class WindowsHotkeys:
             self._kernel32.GlobalUnlock(handle)
             if not self._user32.SetClipboardData(self.CF_UNICODETEXT, handle):
                 raise RuntimeError("Windows не приняла текст в буфер обмена")
-            handle = None  # Ownership passes to the Windows clipboard.
+            handle = None
         finally:
             if handle:
                 self._kernel32.GlobalFree(handle)
             self._user32.CloseClipboard()
 
-    def paste_text(self, text: str, press_enter: bool = False) -> None:
-        if not text:
-            return
-        self.copy_to_clipboard(text)
-        # Use the same Ctrl+V path that the user confirmed works in the MTA console.
-        self._scan_key(self.VK_CONTROL)
+    def clear_clipboard(self) -> None:
+        for _ in range(30):
+            if self._user32.OpenClipboard(self.owner_hwnd):
+                break
+            time.sleep(0.01)
+        else:
+            raise RuntimeError("Не удалось открыть буфер обмена")
         try:
-            time.sleep(0.04)
-            self._scan_key(self.VK_V)
-            time.sleep(0.04)
-            self._scan_key(self.VK_V, up=True)
-            time.sleep(0.04)
+            if not self._user32.EmptyClipboard():
+                raise RuntimeError("Не удалось очистить буфер обмена")
         finally:
-            self._scan_key(self.VK_CONTROL, up=True)
-        time.sleep(0.12)
-        if press_enter:
-            self._scan_key(self.VK_RETURN)
-            self._scan_key(self.VK_RETURN, up=True)
-
-    def type_command(self, command: str, delay: float) -> None:
-        self.paste_text(command, press_enter=True)
-        # Let the game process each line before sending the next one.
-        time.sleep(delay)
+            self._user32.CloseClipboard()
 
 
 class App:
@@ -343,11 +373,17 @@ class App:
         self.hotkeys_enabled = tk.BooleanVar(value=False)
         self.test_hotkeys_enabled = tk.BooleanVar(value=False)
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
-        self.send_lock = threading.Lock()
-        self.hotkeys = WindowsHotkeys(self._queue_status, self._queue_hotkey, self._queue_test_hotkey)
+        self.pending_commands: list[str] = []
+        self.pending_index = 0
+        self.pending_generation = 0
+        self.pending_advance_scheduled = False
+        self.pending_delay = 0.05
+        self.pending_target_hwnd = 0
+        self.hotkeys = WindowsHotkeys(self._queue_status, self._queue_hotkey,
+                                      self._queue_test_hotkey, self._queue_paste_event)
         self._build_ui()
         self.hotkeys.start(root.winfo_id())
-        self.root.after(100, self._drain_events)
+        self.root.after(25, self._drain_events)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
     def _build_ui(self) -> None:
@@ -534,6 +570,9 @@ class App:
     def _queue_test_hotkey(self, index: int) -> None:
         self.events.put(("test", index))
 
+    def _queue_paste_event(self) -> None:
+        self.events.put(("physical_paste", None))
+
     def _drain_events(self) -> None:
         try:
             while True:
@@ -544,9 +583,11 @@ class App:
                     self._hotkey_action(int(value))
                 elif kind == "test":
                     self._test_hotkey_action(int(value))
+                elif kind == "physical_paste":
+                    self._on_physical_paste()
         except queue.Empty:
             pass
-        self.root.after(100, self._drain_events)
+        self.root.after(25, self._drain_events)
 
     def _all_ids(self) -> list[str]:
         return [entry.get().strip() for group in range(4) for i in range(15)
@@ -606,49 +647,100 @@ class App:
     def _test_hotkey_action(self, index: int) -> None:
         if not 0 <= index < len(self.test_entries):
             return
+        if self.pending_commands:
+            self.status.set("Сначала завершите текущую очередь команд")
+            return
         text = self.test_entries[index].get()
         if not text:
-            self.status.set("Тестовое поле пустое — ничего не вставлено")
+            self.status.set("Тестовое поле пустое — ничего не скопировано")
             return
-        if not self.send_lock.acquire(blocking=False):
-            self.status.set("Предыдущая отправка ещё выполняется")
-            return
-        self.status.set(f"Тест: копирую текст {index + 1} в буфер обмена")
-        threading.Thread(target=self._send_test_text, args=(text,), daemon=True).start()
-
-    def _send_test_text(self, text: str) -> None:
         try:
             self.hotkeys.copy_to_clipboard(text)
-            self._queue_status("Тест: текст скопирован. В игре нажмите Ctrl+V, затем Enter.")
+            self.status.set("Тестовый текст скопирован. В игре нажмите Ctrl+V и Enter.")
         except Exception as exc:
-            self._queue_status(f"Ошибка ввода: {exc}. Проверьте запуск приложения и игры с одинаковыми правами.")
-        finally:
-            self.send_lock.release()
+            self.status.set(f"Ошибка буфера обмена: {exc}")
 
     def _hotkey_action(self, index: int) -> None:
-        if not self.send_lock.acquire(blocking=False):
-            self.status.set("Предыдущая отправка ещё выполняется")
-            return
         commands = self._commands_for(index)
         if not commands:
-            self.send_lock.release()
-            self.status.set("Нет заполненных данных — команды не отправлены")
+            self.status.set("Нет заполненных данных — очередь не создана")
             return
-        self.status.set(f"Отправка: {len(commands)} команд(ы). Консоль F8 останется открытой")
-        delay = self._delay_seconds()
-        threading.Thread(target=self._send_commands, args=(commands, delay), daemon=True).start()
 
-    def _send_commands(self, commands: list[str], delay: float) -> None:
+        target_hwnd = self.hotkeys.foreground_hwnd()
+        if not target_hwnd or target_hwnd == self.root.winfo_id():
+            self.status.set("Сначала активируйте окно игры и откройте F8")
+            return
+
+        self.pending_generation += 1
+        generation = self.pending_generation
+        self.pending_commands = commands
+        self.pending_index = 0
+        self.pending_advance_scheduled = False
+        # After Ctrl+V, wait at least 50 ms so the target has consumed the current clipboard.
+        self.pending_delay = max(0.05, self._delay_seconds())
+        self.pending_target_hwnd = target_hwnd
+
+        if not self.hotkeys.monitor_paste(True, target_hwnd):
+            self._reset_pending_queue()
+            self.status.set("Не удалось отслеживать физический Ctrl+V")
+            return
         try:
-            if not WINDOWS:
-                return
-            for command in commands:
-                self.hotkeys.type_command(command, delay=delay)
-            self._queue_status(f"Готово: отправлено {len(commands)} команд(ы)")
+            self.hotkeys.copy_to_clipboard(commands[0])
         except Exception as exc:
-            self._queue_status(f"Ошибка ввода: {exc}. Проверьте запуск приложения и игры с одинаковыми правами.")
-        finally:
-            self.send_lock.release()
+            self._reset_pending_queue()
+            self.status.set(f"Не удалось скопировать команду: {exc}")
+            return
+
+        self.status.set(
+            f"Команда 1/{len(commands)} в буфере: Ctrl+V, затем Enter. "
+            "После Ctrl+V следующая команда подготовится автоматически."
+        )
+
+    def _on_physical_paste(self) -> None:
+        if not self.pending_commands or self.pending_advance_scheduled:
+            return
+        self.pending_advance_scheduled = True
+        generation = self.pending_generation
+        delay_ms = max(50, int(self.pending_delay * 1000))
+        self.status.set("Ctrl+V принят; подготавливаю следующую команду…")
+        self.root.after(delay_ms, lambda: self._advance_command_queue(generation))
+
+    def _advance_command_queue(self, generation: int) -> None:
+        if generation != self.pending_generation or not self.pending_commands:
+            return
+        next_index = self.pending_index + 1
+        if next_index >= len(self.pending_commands):
+            total = len(self.pending_commands)
+            try:
+                self.hotkeys.clear_clipboard()
+            except Exception as exc:
+                self.status.set(f"Очередь закончилась, но буфер очистить не удалось: {exc}")
+            self._reset_pending_queue()
+            self.status.set(f"Готово: последняя команда вставлена ({total}/{total}). Нажмите Enter.")
+            return
+
+        command = self.pending_commands[next_index]
+        try:
+            self.hotkeys.copy_to_clipboard(command)
+        except Exception as exc:
+            self._reset_pending_queue()
+            self.status.set(f"Не удалось подготовить следующую команду: {exc}")
+            return
+
+        self.pending_index = next_index
+        self.pending_advance_scheduled = False
+        self.status.set(
+            f"Команда {next_index + 1}/{len(self.pending_commands)} в буфере. "
+            "Нажмите Enter для предыдущей, затем Ctrl+V."
+        )
+
+    def _reset_pending_queue(self) -> None:
+        self.pending_generation += 1
+        self.pending_commands = []
+        self.pending_index = 0
+        self.pending_advance_scheduled = False
+        self.pending_target_hwnd = 0
+        self.hotkeys.monitor_paste(False)
 
     def save_preset(self) -> None:
         try:
