@@ -61,37 +61,37 @@ def find_hotkey_conflicts(active_categories: dict[str, bool]) -> dict[str, list[
             if len(set(categories)) > 1}
 
 COMMANDS = [
-    ("/respawn", "Возродиться самому"),
-    ("/suicide", "Самоубийство"),
-    ("/admins", "Список администраторов онлайн"),
-    ("/inv", "Стать невидимым"),
-    ("/commands", "Список доступных команд"),
-    ("/reviving <id>", "Возродить игрока"),
-    ("/chatlist", "Список чатов"),
-    ("/deleteallmessagefrom <channel_id> <reason>", "Удалить сообщения из чата"),
-    ("/deleteplayermessage <player_id> <reason>", "Удалить сообщения игрока"),
-    ("/punmute <id>", "Снять мут"),
-    ("/fixveh <vid>", "Починить машину"),
-    ("/flip <vid>", "Поставить машину на колёса"),
-    ("/get <id>", "Телепортировать игрока к себе"),
-    ("/pwarp <id>", "Телепортироваться к игроку"),
-    ("/vget <vid>", "Телепортировать машину к себе"),
-    ("/setfuel <vid> <топливо>", "Установить топливо машине"),
-    ("/pfreeze <id>", "Заморозить игрока"),
-    ("/punfreeze <id>", "Разморозить игрока"),
-    ("/unjail <id>", "Вытащить игрока из тюрьмы"),
-    ("/tempnickname <id> <имя> <фамилия>", "Временное имя игрока"),
-    ("/tempskin <id> <скин>", "Временный скин игрока"),
-    ("/sethp <id> <число>", "Установить здоровье"),
-    ("/setarmor <id> <число>", "Установить броню"),
-    ("/setnickname <id> <имя> <фамилия>", "Сменить ник игрока"),
-    ("/p <id> <пункт правила> <причина>", "Наказать за нарушение правила"),
-    ("/weapongive <id> <ID оружия> <патроны>", "Выдать оружие"),
-    ("/weapontake <id> <ID оружия> <патроны>", "Отобрать оружие"),
-    ("/takeallweapons <id>", "Отобрать всё оружие"),
-    ("/toprison <id>", "Перевести в колонию"),
-    ("/freeprison <id>", "Освободить из колонии"),
-    ("/adminmode", "Включить/выключить режим администратора"),
+    ("respawn", "Возродиться самому"),
+    ("suicide", "Самоубийство"),
+    ("admins", "Список администраторов онлайн"),
+    ("inv", "Стать невидимым"),
+    ("commands", "Список доступных команд"),
+    ("reviving <id>", "Возродить игрока"),
+    ("chatlist", "Список чатов"),
+    ("deleteallmessagefrom <channel_id> <reason>", "Удалить сообщения из чата"),
+    ("deleteplayermessage <player_id> <reason>", "Удалить сообщения игрока"),
+    ("punmute <id>", "Снять мут"),
+    ("fixveh <vid>", "Починить машину"),
+    ("flip <vid>", "Поставить машину на колёса"),
+    ("get <id>", "Телепортировать игрока к себе"),
+    ("pwarp <id>", "Телепортироваться к игроку"),
+    ("vget <vid>", "Телепортировать машину к себе"),
+    ("setfuel <vid> <топливо>", "Установить топливо машине"),
+    ("pfreeze <id>", "Заморозить игрока"),
+    ("punfreeze <id>", "Разморозить игрока"),
+    ("unjail <id>", "Вытащить игрока из тюрьмы"),
+    ("tempnickname <id> <имя> <фамилия>", "Временное имя игрока"),
+    ("tempskin <id> <скин>", "Временный скин игрока"),
+    ("sethp <id> <число>", "Установить здоровье"),
+    ("setarmor <id> <число>", "Установить броню"),
+    ("setnickname <id> <имя> <фамилия>", "Сменить ник игрока"),
+    ("p <id> <пункт правила> <причина>", "Наказать за нарушение правила"),
+    ("weapongive <id> <ID оружия> <патроны>", "Выдать оружие"),
+    ("weapontake <id> <ID оружия> <патроны>", "Отобрать оружие"),
+    ("takeallweapons <id>", "Отобрать всё оружие"),
+    ("toprison <id>", "Перевести в колонию"),
+    ("freeprison <id>", "Освободить из колонии"),
+    ("adminmode", "Включить/выключить режим администратора"),
 ]
 
 
@@ -528,7 +528,7 @@ class App:
 
 2. Скины делят игроков внутри одной колонки на две последовательные команды. Если заполнены оба поля: первая половина ID получает «Скин 1», вторая - «Скин 2». При нечётном числе игроков первая команда получает на одного игрока больше. Если заполнено только одно поле скина, он применяется ко всем ID этой группы.
 
-3. Укажите до трёх ячеек оружия. Для каждого ID оружия выдаются по порядку: сначала все заполненные слоты первому игроку, затем следующему. Команда `/weapongive` получает 1000 патронов.
+3. Укажите до трёх ячеек оружия. Для каждого ID оружия выдаются по порядку: сначала все заполненные слоты первому игроку, затем следующему. Команда `weapongive` получает 1000 патронов.
 
 4. Значения ХР и брони применяются ко всем заполненным ID во всех четырёх колонках. Если поле пустое, соответствующие команды не создаются.
 
@@ -801,7 +801,7 @@ Ctrl+6 - возродить игроков""")
         action = HOTKEYS[action_index][2]
         ids = self._all_ids()
         if action in ("teleport", "revive"):
-            verb = "/get" if action == "teleport" else "/reviving"
+            verb = "get" if action == "teleport" else "reviving"
             return [f"{verb} {pid}" for pid in ids if self._valid_token(pid)]
         if action == "skins":
             result = []
@@ -818,7 +818,7 @@ Ctrl+6 - возродить игроков""")
                     first_team_size = (len(group_ids) + 1) // 2
                     assignments = ([skins[0]] * first_team_size
                                    + [skins[1]] * (len(group_ids) - first_team_size))
-                result.extend(f"/tempskin {pid} {skin}"
+                result.extend(f"tempskin {pid} {skin}"
                               for pid, skin in zip(group_ids, assignments))
             return result
         if action == "weapons":
@@ -831,13 +831,13 @@ Ctrl+6 - возродить игроков""")
                 for pid in group_ids:
                     for weapon in weapons:
                         # The server command requires an ammunition count; use 1000 per weapon.
-                        result.append(f"/weapongive {pid} {weapon} 1000")
+                        result.append(f"weapongive {pid} {weapon} 1000")
             return result
         if action in ("health", "armor"):
             value = self.fields[action].get().strip()
             if not self._valid_token(value):
                 return []
-            verb = "/sethp" if action == "health" else "/setarmor"
+            verb = "sethp" if action == "health" else "setarmor"
             return [f"{verb} {pid} {value}" for pid in ids if self._valid_token(pid)]
         return []
 
