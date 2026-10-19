@@ -11,7 +11,7 @@
 
 ## Интерфейс
 
-Скриншоты МП и Forum сделаны в приложении. Для вкладки ИНФО показан иллюстративный предпросмотр.
+Скриншоты вкладок ИНФО, МП и Forum сделаны в приложении.
 
 <table>
   <tr>
@@ -20,9 +20,9 @@
     <th>Forum</th>
   </tr>
   <tr>
-    <td><a href="docs/screenshots/info.png"><img src="docs/screenshots/info.png" alt="Предпросмотр вкладки ИНФО" width="360"></a></td>
+    <td><a href="docs/screenshots/info.png"><img src="docs/screenshots/info.png" alt="Скриншот вкладки ИНФО" width="360"></a></td>
     <td><a href="docs/screenshots/mp.png"><img src="docs/screenshots/mp.png" alt="Скриншот вкладки МП" width="360"></a></td>
-    <td><a href="docs/screenshots/forum.png"><img src="docs/screenshots/forum.png" alt="Предпросмотр вкладки Forum" width="360"></a></td>
+    <td><a href="docs/screenshots/forum.png"><img src="docs/screenshots/forum.png" alt="Скриншот вкладки Forum" width="360"></a></td>
   </tr>
 </table>
 
