@@ -1013,12 +1013,12 @@ Ctrl+6 - возродить игроков""")
         target_rect = self.hotkeys.window_rect(self.pending_target_hwnd)
         if target_rect:
             left, top, right, bottom = target_rect
-            x = left + 22
+            x = left + (right - left - width) // 2
             y = bottom - height - 32
             x = min(max(x, left + 6), max(left + 6, right - width - 6))
             y = min(max(y, top + 6), max(top + 6, bottom - height - 6))
         else:
-            x = 24
+            x = max(6, (self.root.winfo_screenwidth() - width) // 2)
             y = max(24, self.root.winfo_screenheight() - height - 48)
         window.geometry(f"{width}x{height}+{x}+{y}")
         window.update_idletasks()
