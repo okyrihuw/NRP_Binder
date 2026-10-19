@@ -20,7 +20,6 @@ if os.name == "nt":
 else:
     CONFIG_DIR = Path.home() / ".config" / "bindi_vidacha"
 CONFIG_FILE = CONFIG_DIR / "preset.json"
-THEME_FILE = CONFIG_DIR / "theme.json"
 
 HOTKEYS = [
     ("ТП игроков к себе", "Ctrl+1", "teleport"),
@@ -497,27 +496,9 @@ class App:
     BORDER = "#777777"
     TEXT = "#111111"
     BLUE = "#2F6FB3"
-    THEMES = {
-        "light": {
-            "BG": "#f0f0f0", "SURFACE": "#ffffff", "PANEL": "#e5e5e5",
-            "PANEL_ALT": "#f4f4f4", "TEXT": "#111111", "SUBTEXT": "#333333",
-            "MUTED": "#555555", "BORDER": "#777777", "SOFT_BORDER": "#c5c5c5",
-            "BRAND": "#2F6FB3", "INPUT_BG": "#ffffff", "INPUT_FG": "#111111",
-            "BUTTON_BG": "#f0f0f0", "BUTTON_ACTIVE": "#e5e5e5", "SELECT_BG": "#b9d3f0",
-        },
-        "dark": {
-            "BG": "#1d2024", "SURFACE": "#292d32", "PANEL": "#353a40",
-            "PANEL_ALT": "#262a2e", "TEXT": "#eef1f4", "SUBTEXT": "#c5ccd3",
-            "MUTED": "#9ba4ad", "BORDER": "#727b84", "SOFT_BORDER": "#454c53",
-            "BRAND": "#65a4e8", "INPUT_BG": "#14171a", "INPUT_FG": "#f1f3f4",
-            "BUTTON_BG": "#32373d", "BUTTON_ACTIVE": "#444b52", "SELECT_BG": "#3e5c78",
-        },
-    }
 
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.dark_theme = tk.BooleanVar(value=self._load_theme_preference())
-        self._set_theme_palette(self.dark_theme.get())
         root.title(APP_NAME)
         root.geometry("1200x700")
         root.minsize(980, 620)
@@ -541,125 +522,15 @@ class App:
         self.root.after(25, self._drain_events)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
-    @staticmethod
-    def _load_theme_preference() -> bool:
+    def _build_ui(self) -> None:
+        style = ttk.Style()
         try:
-            data = json.loads(THEME_FILE.read_text(encoding="utf-8"))
-            return data.get("dark") is True if isinstance(data, dict) else False
-        except (OSError, json.JSONDecodeError):
-            return False
-
-    def _save_theme_preference(self) -> bool:
-        try:
-            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            THEME_FILE.write_text(
-                json.dumps({"dark": self.dark_theme.get()}, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            return True
-        except OSError as exc:
-            self.status.set(f"Тема изменена, но не сохранена: {exc}")
-            return False
-
-    def _set_theme_palette(self, dark: bool) -> None:
-        self.palette = self.THEMES["dark" if dark else "light"]
-        self.BG = self.palette["BG"]
-        self.BORDER = self.palette["BORDER"]
-        self.TEXT = self.palette["TEXT"]
-        self.BLUE = self.palette["BRAND"]
-
-    def _color_role(self, color: str) -> str | None:
-        normalized = str(color).lower()
-        legacy = {
-            "#f0f0f0": "BG", "#ffffff": "SURFACE", "white": "SURFACE",
-            "#e5e5e5": "PANEL", "#f4f4f4": "PANEL_ALT",
-            "#111111": "TEXT", "#000000": "TEXT", "black": "TEXT",
-            "#333333": "SUBTEXT", "#777777": "BORDER", "#c5c5c5": "SOFT_BORDER",
-            "#2f6fb3": "BRAND",
-        }
-        role = legacy.get(normalized)
-        if role:
-            return role
-        for role, value in self.THEMES["dark"].items():
-            if normalized == value.lower():
-                return role
-        for role, value in self.THEMES["light"].items():
-            if normalized == value.lower():
-                return role
-        return None
-
-    def _configure_ttk_styles(self) -> None:
-        style = ttk.Style(self.root)
-        try:
-            style.theme_use("clam")
+            style.theme_use("vista" if WINDOWS else "clam")
         except tk.TclError:
             pass
         style.configure("TNotebook", background=self.BG, borderwidth=0)
-        style.configure("TNotebook.Tab", padding=(9, 4), font=("Arial", 9),
-                        background=self.palette["PANEL"], foreground=self.TEXT,
-                        bordercolor=self.BORDER)
-        style.map("TNotebook.Tab",
-                  background=[("selected", self.palette["SURFACE"]),
-                              ("active", self.palette["PANEL_ALT"])],
-                  foreground=[("selected", self.TEXT), ("!selected", self.palette["SUBTEXT"])])
-        style.configure("TScrollbar", background=self.palette["PANEL"],
-                        troughcolor=self.BG, bordercolor=self.BORDER,
-                        arrowcolor=self.TEXT)
-
-    def _apply_widget_theme(self, parent: tk.Misc) -> None:
-        if parent is self.toast_window:
-            return
-        palette = self.palette
-        try:
-            if isinstance(parent, (tk.Tk, tk.Toplevel)):
-                parent.configure(bg=self.BG)
-            elif isinstance(parent, tk.Frame):
-                role = self._color_role(parent.cget("bg"))
-                if role:
-                    parent.configure(bg=palette.get(role, self.BG))
-                for option in ("highlightbackground", "highlightcolor"):
-                    role = self._color_role(parent.cget(option))
-                    if role:
-                        parent.configure(**{option: palette[role]})
-            elif isinstance(parent, tk.Label):
-                bg_role = self._color_role(parent.cget("bg"))
-                fg_role = self._color_role(parent.cget("fg"))
-                parent.configure(bg=palette.get(bg_role, self.BG),
-                                 fg=palette.get(fg_role, self.TEXT))
-            elif isinstance(parent, tk.Entry):
-                parent.configure(bg=palette["INPUT_BG"], fg=palette["INPUT_FG"],
-                                 insertbackground=palette["INPUT_FG"],
-                                 selectbackground=palette["SELECT_BG"],
-                                 selectforeground=palette["TEXT"])
-            elif isinstance(parent, tk.Text):
-                parent.configure(bg=palette["INPUT_BG"], fg=palette["INPUT_FG"],
-                                 insertbackground=palette["INPUT_FG"],
-                                 selectbackground=palette["SELECT_BG"],
-                                 selectforeground=palette["TEXT"])
-            elif isinstance(parent, tk.Checkbutton):
-                parent.configure(bg=self.BG, fg=self.TEXT, activebackground=self.BG,
-                                 activeforeground=self.TEXT, selectcolor=palette["PANEL"],
-                                 disabledforeground=palette["MUTED"])
-            elif isinstance(parent, tk.Button):
-                parent.configure(bg=palette["BUTTON_BG"], fg=self.TEXT,
-                                 activebackground=palette["BUTTON_ACTIVE"],
-                                 activeforeground=self.TEXT)
-            for child in parent.winfo_children():
-                self._apply_widget_theme(child)
-        except tk.TclError:
-            return
-
-    def _toggle_theme(self) -> None:
-        self._set_theme_palette(self.dark_theme.get())
-        self.root.configure(bg=self.BG)
-        self._configure_ttk_styles()
-        self._apply_widget_theme(self.root)
-        if self._save_theme_preference():
-            self.status.set("Включена тёмная тема" if self.dark_theme.get()
-                            else "Включена светлая тема")
-
-    def _build_ui(self) -> None:
-        self._configure_ttk_styles()
+        style.configure("TNotebook.Tab", padding=(9, 4), font=("Arial", 9))
+        style.configure("TButton", font=("Arial", 10), padding=5)
 
         self.root.grid_rowconfigure(0, weight=1)
         self.root.grid_columnconfigure(0, weight=1)
@@ -690,7 +561,6 @@ class App:
                  font=("Arial", 9, "bold")).pack(side="left")
         tk.Label(bottom, textvariable=self.status, bg=self.BG, fg="#333333",
                  font=("Arial", 9)).pack(side="right", padx=8)
-        self._apply_widget_theme(self.root)
 
     def _build_info(self, parent: tk.Frame) -> None:
         parent.grid_rowconfigure(0, weight=1)
@@ -708,11 +578,7 @@ class App:
         tk.Label(card, text="Сервер: Байкальский", bg=self.BG,
                  font=("Arial", 11)).pack(pady=2)
         tk.Label(card, text="Discord: okyrihuw", bg=self.BG,
-                 font=("Arial", 11)).pack(pady=(2, 8))
-        tk.Checkbutton(card, text="Тёмная тема", variable=self.dark_theme,
-                       command=self._toggle_theme, bg=self.BG, fg=self.TEXT,
-                       activebackground=self.BG, activeforeground=self.TEXT,
-                       selectcolor=self.palette["PANEL"], font=("Arial", 10)).pack(pady=(0, 10))
+                 font=("Arial", 11)).pack(pady=(2, 18))
         tk.Button(card, text="Как пользоваться МП", width=30, height=2,
                   command=self._show_gmp_help, font=("Arial", 11)).pack(pady=5)
         tk.Button(card, text="Режим работы программы", width=30, height=2,
