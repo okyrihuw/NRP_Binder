@@ -119,6 +119,13 @@ class WindowsHotkeys:
     SCANCODE_V = 0x2F
     CF_UNICODETEXT = 13
     GMEM_MOVEABLE = 0x0002
+    CAN_INCLUDE_IN_CLIPBOARD_HISTORY = "CanIncludeInClipboardHistory"
+    CAN_UPLOAD_TO_CLOUD_CLIPBOARD = "CanUploadToCloudClipboard"
+    GWL_EXSTYLE = -20
+    WS_EX_TOOLWINDOW = 0x00000080
+    WS_EX_NOACTIVATE = 0x08000000
+    SWP_NOACTIVATE = 0x0010
+    SWP_SHOWWINDOW = 0x0040
 
     def __init__(self, run_action: Callable[[int], None], run_paste: Callable[[], None]):
         self.run_action = run_action
@@ -136,6 +143,7 @@ class WindowsHotkeys:
         self.paste_target_pid = 0
         self._paste_v_down = False
         self._physical_ctrl_down = False
+        self.last_history_exclusion_ok = False
 
     def start(self, owner_hwnd: int | None = None) -> None:
         if not WINDOWS:
@@ -156,6 +164,19 @@ class WindowsHotkeys:
         self._user32.SetClipboardData.restype = ctypes.c_void_p
         self._user32.CloseClipboard.argtypes = []
         self._user32.CloseClipboard.restype = ctypes.c_int
+        self._user32.RegisterClipboardFormatW.argtypes = [wintypes.LPCWSTR]
+        self._user32.RegisterClipboardFormatW.restype = wintypes.UINT
+        self._user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        self._user32.GetWindowRect.restype = wintypes.BOOL
+        self._user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+        self._user32.GetWindowLongW.restype = ctypes.c_long
+        self._user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+        self._user32.SetWindowLongW.restype = ctypes.c_long
+        self._user32.SetWindowPos.argtypes = [
+            wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int, wintypes.UINT
+        ]
+        self._user32.SetWindowPos.restype = wintypes.BOOL
         self._kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
         self._kernel32.GlobalAlloc.restype = ctypes.c_void_p
         self._kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
@@ -221,6 +242,58 @@ class WindowsHotkeys:
         process_id = self._wintypes.DWORD()
         self._user32.GetWindowThreadProcessId(hwnd, self._ctypes.byref(process_id))
         return int(process_id.value)
+
+    def window_rect(self, hwnd: int) -> tuple[int, int, int, int] | None:
+        if not hwnd or not WINDOWS or self._user32 is None:
+            return None
+        rect = self._wintypes.RECT()
+        if not self._user32.GetWindowRect(hwnd, self._ctypes.byref(rect)):
+            return None
+        return int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)
+
+    def configure_nonactivating_overlay(self, hwnd: int) -> bool:
+        if not WINDOWS or self._user32 is None or not hwnd:
+            return False
+        try:
+            style = self._user32.GetWindowLongW(hwnd, self.GWL_EXSTYLE)
+            self._user32.SetWindowLongW(
+                hwnd, self.GWL_EXSTYLE, style | self.WS_EX_TOOLWINDOW | self.WS_EX_NOACTIVATE
+            )
+            return True
+        except Exception:
+            return False
+
+    def show_topmost_overlay(self, hwnd: int, x: int, y: int, width: int, height: int) -> bool:
+        if not WINDOWS or self._user32 is None or not hwnd:
+            return False
+        try:
+            return bool(self._user32.SetWindowPos(
+                hwnd, self._ctypes.c_void_p(-1), x, y, width, height,
+                self.SWP_NOACTIVATE | self.SWP_SHOWWINDOW
+            ))
+        except Exception:
+            return False
+
+    def _set_clipboard_dword_format(self, name: str, value: int = 0) -> bool:
+        fmt = self._user32.RegisterClipboardFormatW(name)
+        if not fmt:
+            return False
+        handle = self._kernel32.GlobalAlloc(self.GMEM_MOVEABLE, self._ctypes.sizeof(self._ctypes.c_uint32))
+        if not handle:
+            return False
+        try:
+            pointer = self._kernel32.GlobalLock(handle)
+            if not pointer:
+                return False
+            self._ctypes.cast(pointer, self._ctypes.POINTER(self._ctypes.c_uint32))[0] = value
+            self._kernel32.GlobalUnlock(handle)
+            if not self._user32.SetClipboardData(fmt, handle):
+                return False
+            handle = None  # Windows owns the HGLOBAL after SetClipboardData succeeds.
+            return True
+        finally:
+            if handle:
+                self._kernel32.GlobalFree(handle)
 
     def _low_level_keyboard_hook(self, code, wparam, lparam):
         if code == self.HC_ACTION and self.paste_hook:
@@ -363,6 +436,7 @@ class WindowsHotkeys:
             self._user32.PostThreadMessageW(self.thread_id, self.WM_QUIT, 0, 0)
 
     def copy_to_clipboard(self, text: str) -> None:
+        self.last_history_exclusion_ok = False
         payload = text.encode("utf-16-le") + b"\x00\x00"
         for _ in range(30):
             if self._user32.OpenClipboard(self.owner_hwnd):
@@ -385,6 +459,19 @@ class WindowsHotkeys:
             if not self._user32.SetClipboardData(self.CF_UNICODETEXT, handle):
                 raise RuntimeError("Windows не приняла текст в буфер обмена")
             handle = None
+            # These registered DWORD formats tell Windows not to retain or sync
+            # the command. They must be written before CloseClipboard().
+            history_flags_ok = True
+            for format_name in (
+                self.CAN_INCLUDE_IN_CLIPBOARD_HISTORY,
+                self.CAN_UPLOAD_TO_CLOUD_CLIPBOARD,
+            ):
+                try:
+                    if not self._set_clipboard_dword_format(format_name, 0):
+                        history_flags_ok = False
+                except Exception:
+                    history_flags_ok = False
+            self.last_history_exclusion_ok = history_flags_ok
         finally:
             if handle:
                 self._kernel32.GlobalFree(handle)
@@ -427,6 +514,8 @@ class App:
         self.pending_advance_scheduled = False
         self.pending_delay = 0.05
         self.pending_target_hwnd = 0
+        self.toast_window: tk.Toplevel | None = None
+        self.toast_after_id = None
         self.hotkeys = WindowsHotkeys(self._queue_hotkey, self._queue_paste_event)
         self._build_ui()
         self.hotkeys.start(root.winfo_id())
@@ -871,11 +960,88 @@ Ctrl+6 - возродить игроков""")
             self._reset_pending_queue()
             self.status.set(f"Не удалось скопировать команду: {exc}")
             return
+        self._show_copy_toast(commands[0], 1, len(commands))
 
         self.status.set(
             f"Команда 1/{len(commands)} в буфере: Ctrl+V, затем Enter. "
             "После Ctrl+V следующая команда подготовится автоматически."
         )
+
+    def _show_copy_toast(self, command: str, index: int, total: int) -> None:
+        if self.toast_after_id is not None:
+            try:
+                self.root.after_cancel(self.toast_after_id)
+            except tk.TclError:
+                pass
+            self.toast_after_id = None
+        if self.toast_window is not None:
+            try:
+                self.toast_window.destroy()
+            except tk.TclError:
+                pass
+            self.toast_window = None
+
+        window = tk.Toplevel(self.root)
+        self.toast_window = window
+        window.withdraw()
+        window.overrideredirect(True)
+        window.configure(bg="#17191b")
+        window.attributes("-topmost", True)
+
+        card = tk.Frame(window, bg="#17191b", highlightbackground="#303438",
+                        highlightthickness=1, width=440, height=122)
+        card.pack(fill="both", expand=True)
+        card.pack_propagate(False)
+        tk.Frame(card, bg="#36d66b", width=5).pack(side="left", fill="y")
+        content = tk.Frame(card, bg="#17191b")
+        content.pack(side="left", fill="both", expand=True, padx=(14, 12), pady=10)
+        tk.Label(content, text="СКОПИРОВАНО В БУФЕР", bg="#17191b", fg="#45e576",
+                 font=("Arial", 9, "bold"), anchor="w").pack(fill="x")
+        display_command = command if len(command) <= 100 else command[:97] + "..."
+        tk.Label(content, text=display_command, bg="#17191b", fg="#ffffff",
+                 font=("Arial", 12, "bold"), anchor="w", justify="left",
+                 wraplength=390).pack(fill="x", pady=(4, 2))
+        tk.Label(content, text="Открой F8 и нажми Ctrl+V", bg="#17191b", fg="#c3c7cb",
+                 font=("Arial", 9), anchor="w").pack(fill="x")
+        history_hint = ("Win+V: не сохраняется" if self.hotkeys.last_history_exclusion_ok
+                        else "Win+V может сохранить команду")
+        tk.Label(content, text=f"Enter нажми сам  -  {index}/{total}  -  {history_hint}",
+                 bg="#17191b", fg="#9aa1a8", font=("Arial", 8),
+                 anchor="w").pack(fill="x", pady=(2, 0))
+
+        width, height = 440, 122
+        target_rect = self.hotkeys.window_rect(self.pending_target_hwnd)
+        if target_rect:
+            left, top, right, bottom = target_rect
+            x = left + 22
+            y = bottom - height - 32
+            x = min(max(x, left + 6), max(left + 6, right - width - 6))
+            y = min(max(y, top + 6), max(top + 6, bottom - height - 6))
+        else:
+            x = 24
+            y = max(24, self.root.winfo_screenheight() - height - 48)
+        window.geometry(f"{width}x{height}+{x}+{y}")
+        window.update_idletasks()
+        try:
+            frame_id = window.wm_frame()
+            hwnd = int(frame_id, 0) if isinstance(frame_id, str) else int(frame_id)
+        except (AttributeError, ValueError, tk.TclError):
+            hwnd = int(window.winfo_id())
+        self.hotkeys.configure_nonactivating_overlay(hwnd)
+        window.deiconify()
+        window.update_idletasks()
+        self.hotkeys.show_topmost_overlay(hwnd, x, y, width, height)
+        self.toast_after_id = self.root.after(2600, lambda: self._dismiss_copy_toast(window))
+
+    def _dismiss_copy_toast(self, window: tk.Toplevel) -> None:
+        if self.toast_window is window:
+            self.toast_window = None
+            self.toast_after_id = None
+        try:
+            if window.winfo_exists():
+                window.destroy()
+        except tk.TclError:
+            pass
 
     def _on_physical_paste(self) -> None:
         if not self.pending_commands or self.pending_advance_scheduled:
@@ -910,6 +1076,7 @@ Ctrl+6 - возродить игроков""")
 
         self.pending_index = next_index
         self.pending_advance_scheduled = False
+        self._show_copy_toast(command, next_index + 1, len(self.pending_commands))
         self.status.set(
             f"Команда {next_index + 1}/{len(self.pending_commands)} в буфере. "
             "Нажмите Enter для предыдущей, затем Ctrl+V."
